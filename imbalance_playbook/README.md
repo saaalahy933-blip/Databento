@@ -2,7 +2,7 @@
 
 Prints ranked **BUY ideas** from the live Nasdaq closing-auction imbalance for stocks priced $1–10.
 Each TRADE row gives the ticker, the number of shares, the highest price to pay and the exit order.
-The rules and the equations behind each column are in the playbook document.
+The rules and the equations behind each column are in the [playbook document](PLAYBOOK.md).
 
 Rules-based output, not financial advice. Backtest first, then paper-trade, then go small.
 
