@@ -11,6 +11,7 @@ import tomllib
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+from dotenv import load_dotenv
 
 ET = ZoneInfo("America/New_York")
 UK = ZoneInfo("Europe/London")
@@ -36,9 +37,12 @@ def fmt_times(ts: pd.Timestamp) -> str:
 
 # --------------------------------------------------------------------------- Databento access
 def api_key() -> str:
+    """DATABENTO_API_KEY from the environment, else from imbalance_playbook/.env (never committed)."""
+    load_dotenv(ROOT / ".env", override=False)  # a key already in the environment wins
     key = os.environ.get("DATABENTO_API_KEY", "").strip()
     if not key:
-        sys.exit("Set your key first:  export DATABENTO_API_KEY=db-...   (Windows: setx DATABENTO_API_KEY db-...)")
+        sys.exit(f"DATABENTO_API_KEY is not set. Copy .env.example to {ROOT / '.env'} and put your key after "
+                 "DATABENTO_API_KEY=  (or export DATABENTO_API_KEY=db-... in your shell).")
     return key
 
 

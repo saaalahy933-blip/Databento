@@ -15,18 +15,27 @@ cd imbalance_playbook
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q tests          # 11 offline tests should pass
+python -m pytest -q tests          # 13 offline tests should pass
 ```
 
 ## 2. Your Databento key (once)
 
 Create a **new** key in the Databento portal (API keys page) and revoke any key you have pasted anywhere.
-Keep the key on your computer only:
+Keep the key on your computer only. The simplest way is a `.env` file in this folder, which git ignores:
+
+```bash
+cp .env.example .env                      # Windows: copy .env.example .env
+# then edit .env so it reads:  DATABENTO_API_KEY=db-xxxxxxxx
+```
+
+Or set it in your shell instead (a key set there takes priority over `.env`):
 
 ```bash
 export DATABENTO_API_KEY=db-xxxxxxxx      # macOS/Linux (add to ~/.zshrc or ~/.bashrc)
 setx DATABENTO_API_KEY db-xxxxxxxx        # Windows (then open a new terminal)
 ```
+
+If no key is found, every script stops straight away with a message saying where to put it.
 
 In the Databento portal, set a monthly budget limit as a second safety net.
 

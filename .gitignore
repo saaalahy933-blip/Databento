@@ -11,5 +11,5 @@ cache/
 results/
 universe.csv
 
-# Secrets: DATABENTO_API_KEY belongs in your environment, never in the repo
+# Secrets: DATABENTO_API_KEY goes in your environment or imbalance_playbook/.env, never in the repo
 .env
