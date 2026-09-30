@@ -96,6 +96,8 @@ def features(snap: pd.DataFrame, universe: pd.DataFrame, cfg: dict, window: str)
     imb_adv    = notional / adv_usd                     (size vs normal trading)
     imb_paired = imb / paired                           (how one-sided the auction is)
     near_gap   = near / ref - 1                         (exchange's own clearing-price move)
+    day_move   = ref / prev_close - 1                   (how far the stock is up today)
+    move_sigma = day_move / sigma                       (that move measured in normal daily moves)
     impact     = k * sigma * sqrt(imb_adv)              (square-root impact law)
     exp_move   = impact              in Window A        (no near price published yet)
                = beta * near_gap     in Window B        (falls back to impact if no near price)
@@ -110,6 +112,8 @@ def features(snap: pd.DataFrame, universe: pd.DataFrame, cfg: dict, window: str)
     df["imb_adv"] = df["notional"] / df["adv_usd"]
     df["imb_paired"] = df["imb"] / df["paired"].where(df["paired"] > 0)
     df["near_gap"] = df["near"] / df["ref"] - 1
+    df["day_move"] = df["ref"] / df["prev_close"] - 1               # move since yesterday's close
+    df["move_sigma"] = df["day_move"] / df["sigma"]                  # that move in "normal days"
     df["impact"] = sig["k_impact"] * df["sigma"] * np.sqrt(df["imb_adv"].clip(lower=0))
     if window == "B":
         df["exp_move"] = (sig["beta_near"] * df["near_gap"]).where(df["near"].notna(), df["impact"])
@@ -139,6 +143,8 @@ def apply_filters(df: pd.DataFrame, cfg: dict, window: str) -> pd.DataFrame:
         ("weak vs paired", df["imb_paired"].fillna(np.inf) < sig["min_imb_to_paired"]),
         ("flipped", ~df["side_stable"].astype(bool)),
         ("shrinking", df["shrink"] > sig["max_shrink"]),
+        ("not up enough today", df["day_move"] < sig.get("min_day_move", -np.inf)),
+        ("move small vs sigma", df["move_sigma"] < sig.get("min_move_to_sigma", -np.inf)),
     ]
     if window == "B":
         rules += [

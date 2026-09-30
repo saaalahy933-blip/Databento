@@ -44,6 +44,9 @@ max_age_s = 30                # snapshot older than this = stale
 lookback_a_s = 60             # stability look-back, Window A (updates every 10 s)
 lookback_b_s = 15             # stability look-back, Window B (updates every 1 s)
 max_shrink = 0.50             # drop if imbalance has shrunk >50% from its recent peak
+# Momentum filters (comment out to switch off). Both use the auction reference price vs yesterday's close.
+# min_day_move = 0.03         # stock already up at least 3% today
+# min_move_to_sigma = 1.5     # and that move is at least 1.5x its normal daily move (20-day sigma)
 
 [costs]
 commission_per_share = 0.0035

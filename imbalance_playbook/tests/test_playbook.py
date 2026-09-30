@@ -110,6 +110,23 @@ def test_filters_give_reasons():
     assert out.loc["HIGH", "reason"] == "price band"
 
 
+def test_momentum_filters_by_hand():
+    cfg = {**CFG, "signal": {**CFG["signal"], "min_day_move": 0.03, "min_move_to_sigma": 1.5}}
+    specs = {"FLAT": 5.00, "UP2": 5.10, "UP5": 5.25}              # ref vs prev close 5.00
+    rows = [(T0, s, "XNAS", "B", ref, np.nan, np.nan, 200_000, 300_000) for s, ref in specs.items()]
+    u = pd.DataFrame({s: dict(prev_close=5.0, adv_usd=10e6, sigma=0.04, venue="XNAS") for s in specs}).T
+    u[["prev_close", "adv_usd", "sigma"]] = u[["prev_close", "adv_usd", "sigma"]].astype(float)
+    feat = E.features(E.snapshot(hist_rows(rows), T0, 60, 30), u, cfg, "A")
+    assert feat.loc["UP5", "day_move"] == pytest.approx(0.05)
+    assert feat.loc["UP5", "move_sigma"] == pytest.approx(1.25)   # 5% / 4% sigma
+    out = E.apply_filters(feat, cfg, "A")
+    assert out.loc["FLAT", "reason"] == out.loc["UP2", "reason"] == "not up enough today"
+    assert out.loc["UP5", "reason"] == "move small vs sigma"      # up 5% but sigma is 4%: only 1.25x
+    loose = {**cfg, "signal": {**cfg["signal"], "min_move_to_sigma": 1.2}}
+    assert E.apply_filters(feat, loose, "A").loc["UP5", "reason"] != "move small vs sigma"
+    assert E.apply_filters(feat, CFG, "A").loc["FLAT", "reason"] != "not up enough today"   # off by default
+
+
 def test_bad_data_never_trades():
     h = hist_rows([(T0, "AAAA", "XNAS", "B", 5.00, np.nan, np.nan, 200_000, np.nan)])     # undefined imbalance
     out = E.run_window(h, uni(), CFG, "A", T0, CLOSE)
