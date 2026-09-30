@@ -391,3 +391,23 @@ def test_api_key_missing_exits_with_hint(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as e:
         C.api_key()
     assert "DATABENTO_API_KEY is not set" in str(e.value) and ".env" in str(e.value)
+
+
+def test_hold_exit_rules_by_hand():
+    import hold_test as H
+    bar = lambda o, h, l, c: {"open": o, "high": h, "low": l, "close": c}
+    days = lambda *b: pd.DataFrame(list(b))
+    # target reached on day 2 at 11.0 (entry 10, +10%)
+    assert H.hold_exit(10, days(bar(10, 10.5, 9.8, 10.2), bar(10.3, 11.2, 10.1, 11)), 0.10, 0.05, 20) == (11.0, "target", 2)
+    # same day touches both: the stop (9.5) counts first
+    assert H.hold_exit(10, days(bar(10, 11.5, 9.4, 10)), 0.10, 0.05, 20) == (9.5, "stop", 1)
+    # gap down through the stop fills at the open; gap up through the target fills at the open
+    assert H.hold_exit(10, days(bar(9.0, 9.2, 8.8, 9.1)), 0.10, 0.05, 20) == (9.0, "stop", 1)
+    assert H.hold_exit(10, days(bar(11.4, 11.6, 11.3, 11.5)), 0.10, 0.05, 20) == (11.4, "target", 1)
+    # neither level within max days: sell at that day's close; too little data: open
+    flat = days(*[bar(10, 10.4, 9.7, 10.1)] * 3)
+    assert H.hold_exit(10, flat, 0.10, 0.05, 3) == (10.1, "time", 3)
+    px, reason, held = H.hold_exit(10, flat, 0.10, 0.05, 20)
+    assert np.isnan(px) and reason == "open" and held == 3
+    # no stop: a deep dip does not exit
+    assert H.hold_exit(10, days(bar(10, 10.2, 8.0, 10), bar(10, 11.0, 9.9, 10.8)), 0.10, None, 20) == (11.0, "target", 2)
