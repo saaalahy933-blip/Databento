@@ -48,6 +48,7 @@ python backtest.py --start 2025-10-01 --end 2026-09-29
 The tool shows a cost estimate and waits for `y` before buying anything.
 For a backtest the estimate is based on a sample of sessions plus 20%, and `--max-cost` is a hard cap.
 Everything it downloads is cached in `./cache`, so re-runs with new settings cost nothing.
+Downloads run 8 at a time; `--workers 1` goes one at a time.
 
 The backtest is deliberately strict:
 - A buy only counts if the Nasdaq ask was at or below your limit within 60 seconds. If not, it's a miss, and misses are often the stocks that ran.

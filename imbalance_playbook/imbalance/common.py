@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 import tomllib
 from zoneinfo import ZoneInfo
 
@@ -67,7 +68,7 @@ class Fetcher:
         if self.cached(req):
             return 0.0
         q = {k: v for k, v in req.items() if k in ("dataset", "schema", "symbols", "start", "end", "stype_in")}
-        return float(self.client.metadata.get_cost(**q))
+        return float(self._retry(lambda: self.client.metadata.get_cost(**q)))
 
     def approve(self, estimate_usd: float, what: str) -> None:
         print(f"\nEstimated Databento cost for {what}: ${estimate_usd:,.2f} "
@@ -79,11 +80,23 @@ class Fetcher:
                 sys.exit("Cancelled. Nothing was bought.")
         self.spent_estimate += estimate_usd
 
+    RETRY_WAITS_S = (2, 8, 30)   # a busy Databento gateway sometimes answers 502/503/504
+
+    def _retry(self, call):
+        for wait in (*self.RETRY_WAITS_S, None):
+            try:
+                return call()
+            except Exception as e:
+                if wait is None or not 500 <= (getattr(e, "http_status", None) or 0) < 600:
+                    raise
+                print(f"  Databento {e.http_status}; retrying in {wait}s", flush=True)
+                time.sleep(wait)
+
     def get(self, **req) -> pd.DataFrame:
         path = self._path(req)
         if path.exists():
             return pd.read_pickle(path)
-        store = self.client.timeseries.get_range(**req)
+        store = self._retry(lambda: self.client.timeseries.get_range(**req))
         df = store.to_df()
         df = df.reset_index() if df.index.name else df
         # An empty answer is cached only when the period is long over (a weekend, a holiday).

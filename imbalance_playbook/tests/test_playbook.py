@@ -164,6 +164,71 @@ def test_backtest_end_to_end(tmp_path, monkeypatch):
     assert fake2.calls == []
 
 
+def test_parallel_prefetch_buys_nothing_extra(tmp_path, monkeypatch):
+    import backtest
+    runs = {}
+    for workers in (1, 8):
+        monkeypatch.setattr(C, "ROOT", tmp_path / str(workers))
+        fake = F.FakeHistorical()
+        f = C.Fetcher(fake, tmp_path / str(workers), max_usd=100, assume_yes=True)
+        trades, _ = backtest.backtest(f, CFG, dt.date(2026, 9, 8), dt.date(2026, 9, 29), workers=workers)
+        runs[workers] = (sorted(fake.calls), trades.sort_index().to_csv())
+    assert runs[8][0] == runs[1][0]                                # same requests, none twice
+    assert runs[8][1] == runs[1][1]                                # same trades
+
+
+class _Flaky:
+    """get_range fails with the given HTTP statuses, then answers like the fake API."""
+
+    def __init__(self, statuses):
+        self.statuses, self.fake = list(statuses), F.FakeHistorical()
+        self.metadata, self.attempts = self.fake.metadata, 0
+        self.timeseries = F.NS(get_range=self._get_range)
+
+    def _get_range(self, **req):
+        self.attempts += 1
+        if self.statuses:
+            raise F.db.BentoServerError(http_status=self.statuses.pop(0), message="flaky")
+        return self.fake.timeseries.get_range(**req)
+
+
+def test_server_errors_are_retried_then_succeed(tmp_path, monkeypatch):
+    monkeypatch.setattr(C.Fetcher, "RETRY_WAITS_S", (0, 0, 0))
+    client = _Flaky([504, 502])
+    f = C.Fetcher(client, tmp_path, max_usd=100, assume_yes=True)
+    df = f.get(**C.req_definitions("XNAS.ITCH", dt.date(2026, 9, 4)))
+    assert not df.empty and client.attempts == 3
+    client = _Flaky([503])
+    client.metadata = F.NS(get_cost=lambda **q: client.timeseries.get_range(**q) and 0.5)   # 503 once, then 0.5
+    assert C.Fetcher(client, tmp_path / "q", max_usd=100, assume_yes=True).quote(
+        C.req_definitions("XNAS.ITCH", dt.date(2026, 9, 3))) == 0.5          # cost quotes are retried too
+
+
+def test_client_errors_and_persistent_server_errors_are_raised(tmp_path, monkeypatch):
+    monkeypatch.setattr(C.Fetcher, "RETRY_WAITS_S", (0, 0, 0))
+    req = C.req_definitions("XNAS.ITCH", dt.date(2026, 9, 4))
+    client = _Flaky([400])
+    with pytest.raises(F.db.BentoServerError):
+        C.Fetcher(client, tmp_path / "a", max_usd=100, assume_yes=True).get(**req)
+    assert client.attempts == 1                                    # a 4xx is never retried
+    client = _Flaky([504] * 4)
+    with pytest.raises(F.db.BentoServerError):
+        C.Fetcher(client, tmp_path / "b", max_usd=100, assume_yes=True).get(**req)
+    assert client.attempts == 4                                    # 3 retries, then give up
+
+
+def test_listings_on_a_monday_holiday_step_back_to_friday(tmp_path, monkeypatch):
+    from imbalance import build as B
+    assert B.weekdays_back(dt.date(2026, 9, 7), 3) == [dt.date(2026, 9, 7), dt.date(2026, 9, 4), dt.date(2026, 9, 3)]
+    labor_day = dt.date(2026, 9, 7)
+    monkeypatch.setattr(F, "SESSIONS", [x for x in F.SESSIONS if x != labor_day])
+    fake = F.FakeHistorical()
+    f = C.Fetcher(fake, tmp_path, max_usd=100, assume_yes=True)
+    listings = B.fetch_listings(f, CFG, [labor_day], "test")      # a weekend request would raise a 504
+    assert listings[labor_day]["AAAA"] == "XNAS"
+    assert len(fake.calls) == 2                                    # Mon (empty), then Fri
+
+
 def test_ticker_called_NA_survives_csv(tmp_path):
     import live_signals as L
     p = tmp_path / "u.csv"

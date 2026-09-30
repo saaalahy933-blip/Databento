@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import math
+from concurrent.futures import ThreadPoolExecutor
 
 import databento as db
 import numpy as np
@@ -126,17 +127,33 @@ def main() -> None:
     ap.add_argument("--config")
     ap.add_argument("--max-cost", type=float, default=25.0, help="abort if any one estimate exceeds this ($)")
     ap.add_argument("--yes", action="store_true")
+    ap.add_argument("--workers", type=int, default=8, help="parallel downloads (1 = one at a time)")
     a = ap.parse_args()
 
     cfg = C.load_config(a.config)
     client = db.Historical(C.api_key())
     f = C.Fetcher(client, C.ROOT / "cache", a.max_cost, a.yes)
     fit_end = dt.date.fromisoformat(a.fit_end) if a.fit_end else None
-    backtest(f, cfg, dt.date.fromisoformat(a.start), dt.date.fromisoformat(a.end), a.windows, a.close, fit_end)
+    backtest(f, cfg, dt.date.fromisoformat(a.start), dt.date.fromisoformat(a.end), a.windows, a.close, fit_end,
+             a.workers)
+
+
+def prefetch(f: C.Fetcher, reqs: list[dict], workers: int) -> None:
+    """Download (and cache) many requests at once; the day-by-day loop then reads them from the cache."""
+    todo = [r for r in reqs if not f.cached(r)]
+    if workers <= 1 or not todo:
+        return
+    print(f"  downloading {len(todo):,} requests, {workers} at a time")
+    done = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for _ in pool.map(lambda r: f.get(**r), todo):
+            done += 1
+            if done % 100 == 0 or done == len(todo):
+                print(f"  {done:,}/{len(todo):,} downloaded")
 
 
 def backtest(f: C.Fetcher, cfg: dict, start: dt.date, end: dt.date, windows: str = "AB",
-             close_hhmm: str = "16:00", fit_end: dt.date | None = None):
+             close_hhmm: str = "16:00", fit_end: dt.date | None = None, workers: int = 8):
     sch, sig = cfg["schedule"], cfg["signal"]
     wait = cfg["execution"]["fill_wait_s"]
     # 1. listing venue each month (keeps later-delisted stocks: no survivorship bias)
@@ -161,26 +178,28 @@ def backtest(f: C.Fetcher, cfg: dict, start: dt.date, end: dt.date, windows: str
         if uni.empty:
             continue
         close_at = C.close_time(d, close_hhmm)
-        reqs = []
+        reqs, known = [], []       # known: exactly what the day-by-day loop will ask for (safe to prefetch)
         for w in windows:
             at = close_at - pd.Timedelta(seconds=offsets[w])
-            reqs += B.imbalance_requests(cfg, uni, at - pd.Timedelta(seconds=fetch_back[w]), at + pd.Timedelta(seconds=1))
+            known += B.imbalance_requests(cfg, uni, at - pd.Timedelta(seconds=fetch_back[w]), at + pd.Timedelta(seconds=1))
             top = uni.head(cfg["account"]["max_positions"])        # allowance for the fill check
             reqs += [C.req_bbo(cfg["datasets"][v], list(g.index), at, at + pd.Timedelta(seconds=wait))
                      for v, g in top.groupby("venue")]
         by_venue = {v: sorted(g.index) for v, g in uni.groupby("venue")}
-        reqs += B.close_requests(cfg, by_venue, close_at)
-        plan.append((d, uni, close_at, by_venue, reqs))
+        known += B.close_requests(cfg, by_venue, close_at)
+        plan.append((d, uni, close_at, by_venue, reqs + known, known))
     if not plan:
         raise SystemExit("No sessions with a universe in that range.")
     sample = plan[:: max(1, len(plan) // 5)][:5]
     per_day = float(np.mean([sum(f.quote(r) for r in p[4]) for p in sample]))
     f.approve(per_day * len(plan) * 1.2, f"imbalance, quotes and closing prices for {len(plan)} sessions "
                                          f"(estimate from {len(sample)} sampled sessions, +20%)")
+    # imbalance + closing prices in parallel; the fill-check quotes depend on the ideas, so they stay in the loop
+    prefetch(f, [r for p in plan for r in p[5]], workers)
 
     # 4. run the engine day by day with one ledger per session
     trades, calib = [], []
-    for i, (d, uni, close_at, by_venue, _) in enumerate(plan, 1):
+    for i, (d, uni, close_at, by_venue, _, _) in enumerate(plan, 1):
         closes = B.official_closes(f, cfg, by_venue, close_at)
         nxt = next_open_tbl.loc[d] if d in next_open_tbl.index else pd.Series(dtype=float)
         issued: dict[str, float] = {}

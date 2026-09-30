@@ -36,12 +36,23 @@ def definition_dates(first: dt.date, last: dt.date) -> list[dt.date]:
     return out
 
 
+def weekdays_back(d: dt.date, n: int) -> list[dt.date]:
+    """`d` (if a weekday) and the weekdays before it, newest first, `n` in total."""
+    out = []
+    while len(out) < n:
+        if d.weekday() < 5:
+            out.append(d)
+        d -= dt.timedelta(days=1)
+    return out
+
+
 def fetch_listings(f: C.Fetcher, cfg: dict, dates: list[dt.date], what: str) -> dict[dt.date, pd.Series]:
-    """symbol -> listing venue, as of each date (steps back over weekends/holidays)."""
+    """symbol -> listing venue, as of each date (steps back over holidays, never onto a weekend:
+    Databento answers weekend definition requests with a 504 instead of an empty result)."""
     ds = cfg["datasets"]["XNAS"]
     reqs = []
     for d in dates:
-        reqs.append([C.req_definitions(ds, d - dt.timedelta(days=i)) for i in range(4)])
+        reqs.append([C.req_definitions(ds, w) for w in weekdays_back(d, 4)])
     f.approve(sum(f.quote(r[0]) for r in reqs), what)
     out = {}
     for d, tries in zip(dates, reqs):

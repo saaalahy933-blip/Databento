@@ -113,6 +113,8 @@ class FakeHistorical:
         recs = []
         if schema == "definition":
             day = start.date()
+            if day.weekday() >= 5:   # the real API times out on weekend definition requests
+                raise db.BentoServerError(http_status=504, message="504 gateway timed out")
             if day in SESSIONS:
                 for s, v in LISTING.items():
                     recs.append(d.InstrumentDefMsg(
