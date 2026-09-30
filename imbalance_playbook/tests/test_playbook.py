@@ -141,6 +141,7 @@ def test_uk_times_across_dst_mismatch():
 # ------------------------------------------------------------------ end to end on fake Databento
 def test_backtest_end_to_end(tmp_path, monkeypatch):
     import backtest
+    monkeypatch.setattr(C, "ROOT", tmp_path)               # keep fake results out of the real results/
     f = C.Fetcher(F.FakeHistorical(), tmp_path, max_usd=100, assume_yes=True)
     trades, calib = backtest.backtest(f, CFG, dt.date(2026, 9, 8), dt.date(2026, 9, 29))
     filled = trades[~trades["missed"]]
