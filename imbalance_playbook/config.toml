@@ -1,0 +1,74 @@
+# Closing-auction BUY-imbalance playbook — every tunable number lives here.
+# Values marked (calibrate) should be replaced by what backtest.py prints.
+
+[account]
+equity_usd = 25000            # trading capital the sizing is based on
+risk_per_trade_pct = 0.25     # % of equity at risk per idea (see sizing below)
+max_positions = 5             # max TRADE ideas per session (all four prints together)
+max_notional_per_trade_usd = 5000
+max_gross_usd = 20000         # total $ bought per session (all four prints together)
+
+[universe]
+min_price = 1.0
+max_price = 10.0
+min_adv_usd = 2000000         # 20-day average $ volume floor
+lookback_days = 20
+min_history_days = 15
+venues = ["XNAS"]             # listing venues to scan. Add "XNYS"/"XASE" to see them as WATCH rows
+                              # (only Nasdaq-listed names can be TRADE — see playbook, exits)
+exclude_suffixes = ["W", "R", "U"]   # 5-letter Nasdaq warrants / rights / units
+max_abs_log_return = 0.40     # daily |log return| above this (~+49% / -33%) is treated as a
+                              # split or bad print, not a real move (bars are not split-adjusted)
+
+[datasets]                    # listing venue -> Databento dataset with its closing imbalance
+XNAS = "XNAS.ITCH"
+XNYS = "XNYS.PILLAR"
+XASE = "XASE.PILLAR"
+
+[closing_auction_types]       # which auction_type codes mean "closing auction" per dataset
+"XNAS.ITCH" = ["C"]
+"XNYS.PILLAR" = ["C", "P", "R"]
+"XASE.PILLAR" = ["C", "P", "R"]
+
+[signal]
+side = "B"                    # B = buy imbalances only
+top_n = 30                    # size of the watch list (largest buy imbalances by $)
+min_notional_usd = 100000     # imbalance shares x reference price
+min_imb_to_adv = 0.01         # imbalance $ / 20-day ADV $
+min_imb_to_paired = 0.20      # imbalance shares / paired shares
+k_impact = 0.75               # (calibrate) Window A: expected move = k * sigma * sqrt(imb/ADV)
+beta_near = 0.50              # (calibrate) Window B: expected move = beta * (near price / ref - 1)
+max_near_gap = 0.08           # ignore near-price gaps above 8% (thin book / bad print)
+min_edge_bps = 25             # expected move minus costs must beat this
+max_age_s = 30                # snapshot older than this = stale
+lookback_a_s = 60             # stability look-back, Window A (updates every 10 s)
+lookback_b_s = 15             # stability look-back, Window B (updates every 1 s)
+max_shrink = 0.50             # drop if imbalance has shrunk >50% from its recent peak
+
+[costs]
+commission_per_share = 0.0035
+min_commission = 0.35
+slippage_bps = 5
+# assumed full bid-ask spread by price bucket, in basis points (calibrate from your fills)
+spread_bps_1_2 = 80
+spread_bps_2_5 = 40
+spread_bps_5_10 = 20
+
+[sizing]
+z_adverse = 2.0               # size so a 2-sigma move to the close loses risk_per_trade_pct
+max_participation = 0.10      # never buy more than 10% of the imbalance itself
+
+[execution]
+loc_buffer = 0.0              # Window B exit: sell LOC at the reference price. Nasdaq re-prices a sell LOC
+                              # entered 15:55-15:58 that is more aggressive (lower) than the 15:50/15:55
+                              # reference price up to that reference, so a lower limit gains nothing.
+fill_wait_s = 60              # backtest: buy counts only if the Nasdaq ask was <= limit within this time
+
+[schedule]                    # seconds BEFORE the close (works on half-days too)
+window_a_s = 420              # 15:53:00 ET  — signal from early NOII (impact model)
+window_a_last_call_s = 330    # 15:54:30 ET  — last reprint before Nasdaq MOC cut-off
+moc_cutoff_s = 300            # 15:55:00 ET  — Nasdaq MOC entry cut-off
+window_b_s = 240              # 15:56:00 ET  — signal from near price (clearing-price model)
+window_b_last_call_s = 150    # 15:57:30 ET
+loc_cutoff_s = 120            # 15:58:00 ET  — Nasdaq LOC entry cut-off
+subscribe_s = 660             # 15:49:00 ET  — live feed starts (replays from here)

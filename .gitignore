@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Written by the imbalance tool: paid Databento downloads, daily universe, idea logs
+# and backtest output. Keep them local (the data is licensed, the logs are yours).
+cache/
+results/
+universe.csv
+
+# Secrets: DATABENTO_API_KEY belongs in your environment, never in the repo
+.env
