@@ -138,7 +138,7 @@ Keep your Databento key on your own computer as the setting `DATABENTO_API_KEY`.
 Work down this list in order. Each step can stop the project, and that is its purpose.
 
 - [ ] Revoke the Databento key that was pasted into the chat, create a new one, and set a monthly budget limit in the Databento portal.
-- [ ] Install the tool and run `python -m pytest -q tests` (11 offline tests should pass).
+- [ ] Install the tool and run `python -m pytest -q tests` (12 offline tests should pass).
 - [ ] Backtest at least 12 months: `python backtest.py --start 2025-10-01 --end 2026-09-29`. The backtest counts a buy only if the ask was at or below your limit, so it includes missed fills.
 - [ ] Paste the fitted `k_impact` and `beta_near` from the FIT period into `config.toml` and re-run (cached, so free).
 - [ ] Continue only if the **TEST** period is clearly positive after costs, over enough trades (aim for 100+).

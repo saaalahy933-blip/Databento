@@ -15,13 +15,21 @@ cd imbalance_playbook
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q tests          # 11 offline tests should pass
+python -m pytest -q tests          # 12 offline tests should pass
 ```
 
 ## 2. Your Databento key (once)
 
 Create a **new** key in the Databento portal (API keys page) and revoke any key you have pasted anywhere.
-Keep the key on your computer only:
+Keep the key on your computer only. The simplest place is a `.env` file in this folder:
+
+```bash
+cp .env.example .env                      # Windows: copy .env.example .env
+nano .env                                 # Windows: notepad .env
+```
+
+Put your key after `DATABENTO_API_KEY=` and save. Git ignores `.env`, so the key never reaches GitHub.
+Alternatively, set it in your shell. A key set there wins over `.env`:
 
 ```bash
 export DATABENTO_API_KEY=db-xxxxxxxx      # macOS/Linux (add to ~/.zshrc or ~/.bashrc)
@@ -109,6 +117,7 @@ The size limits in `config.toml` (`max_positions`, `max_gross_usd`) count the wh
 | File | Purpose |
 |---|---|
 | `config.toml` | Every threshold, cost and size limit |
+| `.env.example` | Template for `.env`, which holds your Databento key and is never committed |
 | `imbalance/engine.py` | The equations (pure maths, tested) |
 | `imbalance/common.py` | Clock, cached Databento access with cost guard, printing |
 | `imbalance/build.py` | Turns Databento data into engine inputs |
