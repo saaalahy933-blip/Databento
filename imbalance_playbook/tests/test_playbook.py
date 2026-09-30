@@ -175,6 +175,23 @@ def test_network_timeouts_are_retried(tmp_path, monkeypatch):
     assert not df.empty and calls["n"] == 2
 
 
+def test_streaming_timeouts_are_retried(tmp_path, monkeypatch):
+    from databento.common.error import BentoError
+    monkeypatch.setattr(C.Fetcher, "RETRY_WAITS_S", (0, 0, 0))
+    fake, calls = F.FakeHistorical(), []
+
+    def get_range(**req):
+        calls.append(1)
+        if len(calls) == 1:   # what databento raises when the body read times out mid-download
+            raise BentoError("Error streaming response: HTTPSConnectionPool(host='hist.databento.com', port=443): "
+                             "Read timed out.")
+        return fake.timeseries.get_range(**req)
+
+    client = F.NS(metadata=fake.metadata, timeseries=F.NS(get_range=get_range))
+    df = C.Fetcher(client, tmp_path, max_usd=100, assume_yes=True).get(**C.req_definitions("XNAS.ITCH", dt.date(2026, 9, 4)))
+    assert not df.empty and len(calls) == 2
+
+
 def test_bad_data_never_trades():
     h = hist_rows([(T0, "AAAA", "XNAS", "B", 5.00, np.nan, np.nan, 200_000, np.nan)])     # undefined imbalance
     out = E.run_window(h, uni(), CFG, "A", T0, CLOSE)

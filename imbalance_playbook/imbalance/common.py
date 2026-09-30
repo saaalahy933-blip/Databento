@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
+from databento.common.error import BentoError, BentoHttpError
 from dotenv import load_dotenv
 
 ET = ZoneInfo("America/New_York")
@@ -88,7 +89,9 @@ class Fetcher:
             try:
                 return call()
             except Exception as e:
-                network = isinstance(e, (requests.Timeout, requests.ConnectionError))
+                # a timeout while streaming the body arrives as a plain BentoError, not an HTTP status
+                network = isinstance(e, (requests.Timeout, requests.ConnectionError)) or (
+                    isinstance(e, BentoError) and not isinstance(e, BentoHttpError))
                 if wait is None or not (network or 500 <= (getattr(e, "http_status", None) or 0) < 600):
                     raise
                 print(f"  Databento {getattr(e, 'http_status', None) or type(e).__name__}; retrying in {wait}s", flush=True)
