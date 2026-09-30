@@ -196,6 +196,8 @@ def backtest(f: C.Fetcher, cfg: dict, start: dt.date, end: dt.date, windows: str
     sessions = [d for d in stats["prev_close"].index if start <= d <= end]
     offsets = {"A": sch["window_a_s"], "B": sch["window_b_s"]}
     fetch_back = {w: max(sig["lookback_a_s"] if w == "A" else sig["lookback_b_s"], sig["max_age_s"]) for w in "AB"}
+    if "min_buy_print_share" in sig:   # "repeated" is judged over every print since Nasdaq starts publishing
+        fetch_back = {w: max(b, E.CLOSING_IMBALANCE_FROM_S - offsets[w]) for w, b in fetch_back.items()}
 
     # 3. plan every request, quote a sample of sessions, extrapolate, ask once
     plan = []

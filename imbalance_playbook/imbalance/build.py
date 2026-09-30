@@ -165,10 +165,10 @@ def activity_requests(cfg: dict, symbols: list[str], session: dt.date, until: pd
     if not symbols:
         return []
     out = []
-    if "min_rel_volume" in sig:
+    if "min_rel_volume" in sig or sig.get("rank_by") == "move_x_rvol":
         first = (prior_dates[-a["rel_volume_days"]:] or [session])[0]
         out.append(C.req_minute_bars(a["volume_dataset"], symbols, C.session_open(first), until))
-    if "min_block_shares" in sig:
+    if "min_block_shares" in sig or "min_block_count" in sig:
         out.append(C.req_trades(a["trades_dataset"], symbols, C.session_open(session), until))
     if "min_call_put_ratio" in sig:
         out.append(C.req_option_volume(a["options_dataset"], symbols, session))
@@ -215,6 +215,8 @@ def fetch_activity(f: C.Fetcher, cfg: dict, symbols: list[str], session: dt.date
             out["rel_volume"] = E.rel_volume(raw, session, at, a["rel_volume_days"], a["min_volume_days"]).reindex(out.index)
         elif req["schema"] == "trades":
             out["max_block"] = E.max_block(raw, at, a.get("block_publisher_ids")).reindex(out.index)
+            out["buy_blocks"] = E.buy_blocks(raw, at, cfg["signal"].get("min_block_shares", 0),
+                                             a.get("block_publisher_ids")).reindex(out.index)
         else:
             out["cp_ratio"] = E.call_put_ratio(raw).reindex(out.index)
     return out

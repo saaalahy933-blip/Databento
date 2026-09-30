@@ -158,6 +158,63 @@ def test_opening_cross_on_the_exchange_is_not_a_block():
     assert CFG["activity"]["block_publisher_ids"] == [82, 83]
 
 
+def test_repeated_imbalance_blocks_and_best_idea_by_hand():
+    s = lambda sec: T0 - pd.Timedelta(seconds=sec)
+    rows = [(s(150), "X", "XNAS", "A", 5.2, np.nan, np.nan, 200_000, 300_000)]   # sold earlier, before the look-back
+    rows += [(s(k), sym, "XNAS", "B", 5.2, np.nan, np.nan, 200_000, 300_000) for k in (120, 60, 0) for sym in "XY"]
+    u = pd.DataFrame({sym: dict(prev_close=5.0, adv_usd=10e6, sigma=0.04, venue="XNAS") for sym in "XY"}).T
+    u[["prev_close", "adv_usd", "sigma"]] = u[["prev_close", "adv_usd", "sigma"]].astype(float)
+    feat = E.features(E.snapshot(hist_rows(rows), T0, 60, 30), u, CFG, "A")
+    assert feat.loc["X", "buy_share"] == pytest.approx(0.75) and feat.loc["Y", "buy_share"] == 1.0
+    rep = {**CFG, "signal": {**CFG["signal"], "min_buy_print_share": 1.0}}
+    out = E.apply_filters(feat, rep, "A")
+    assert out.loc["X", "reason"] == "imbalance not repeated" and out.loc["Y", "ok"]
+    assert E.apply_filters(feat, CFG, "A").loc["X", "ok"]                          # off by default
+
+    # blocks: tick test on every print, only off-exchange (82/83) blocks of 300k+ before `at` count
+    t = lambda sec, sym, px, size, pub: (s(sec), sym, px, size, pub)
+    trades = pd.DataFrame([t(900, "X", 5.00, 100, 81),
+                           t(800, "X", 5.01, 400_000, 82),     # uptick: buy
+                           t(700, "X", 5.01, 350_000, 83),     # same price after an uptick: still a buy
+                           t(600, "X", 5.00, 500_000, 82),     # downtick: a sell
+                           t(500, "X", 5.02, 900_000, 81),     # uptick, but on the exchange
+                           t(-5, "X", 5.03, 400_000, 82),      # after the signal
+                           t(900, "Y", 5.00, 400_000, 82)],    # first print of the day: no tick yet
+                          columns=["ts_event", "symbol", "price", "size", "publisher_id"])
+    n = E.buy_blocks(trades, T0, 300_000, [82, 83])
+    assert n["X"] == 2 and n["Y"] == 0
+
+    # one trade a day: the evening's single slot goes to the best day move x relative volume
+    best = {**CFG, "account": {**CFG["account"], "max_positions": 1}}
+    rows = [(T0, "P", "XNAS", "B", 5.5, np.nan, np.nan, 200_000, 600_000),     # up 10%, bigger imbalance
+            (T0, "Q", "XNAS", "B", 5.15, np.nan, np.nan, 200_000, 300_000)]    # up 3%, but 5x volume
+    u = pd.DataFrame({sym: dict(prev_close=5.0, adv_usd=10e6, sigma=0.04, venue="XNAS") for sym in "PQ"}).T
+    u[["prev_close", "adv_usd", "sigma"]] = u[["prev_close", "adv_usd", "sigma"]].astype(float)
+    filt = E.apply_filters(E.features(E.snapshot(hist_rows(rows), T0, 60, 30), u, best, "A"), best, "A")
+    filt["rel_volume"] = pd.Series({"P": 1.0, "Q": 5.0})
+    assert filt["ok"].all() and filt.loc["P", "edge"] > filt.loc["Q", "edge"]
+    by_edge = E.pick_trades(filt, best, "A", 420)
+    assert list(by_edge.index[by_edge["action"] == "TRADE"]) == ["P"]
+    ranked = {**best, "signal": {**best["signal"], "rank_by": "move_x_rvol"}}
+    by_rank = E.pick_trades(filt, ranked, "A", 420)
+    assert list(by_rank.index[by_rank["action"] == "TRADE"]) == ["Q"]            # 3% x 5 beats 10% x 1
+    assert by_rank.loc["P", "reason"] == "max positions tonight"
+
+
+def test_repeat_rule_fetches_imbalances_from_1550(tmp_path, monkeypatch):
+    import backtest
+    monkeypatch.setattr(C, "ROOT", tmp_path)
+    cfg = {**CFG, "signal": {**CFG["signal"], "min_buy_print_share": 1.0}}
+    fake, seen = F.FakeHistorical(), []
+    real = fake.timeseries.get_range
+    fake.timeseries = F.NS(get_range=lambda **req: (seen.append(req), real(**req))[1])
+    f = C.Fetcher(fake, tmp_path, max_usd=100, assume_yes=True)
+    trades, _ = backtest.backtest(f, cfg, dt.date(2026, 9, 8), dt.date(2026, 9, 29))
+    assert set(trades[~trades["missed"]].index) == {"AAAA"}     # buy on every print since 15:50
+    starts = {pd.Timestamp(r["start"]).tz_convert(C.ET).strftime("%H:%M") for r in seen if r["schema"] == "imbalance"}
+    assert starts == {"15:50"}
+
+
 def test_network_timeouts_are_retried(tmp_path, monkeypatch):
     import requests
     monkeypatch.setattr(C.Fetcher, "RETRY_WAITS_S", (0, 0, 0))

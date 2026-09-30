@@ -51,6 +51,12 @@ max_shrink = 0.50             # drop if imbalance has shrunk >50% from its recen
 # min_rel_volume = 1.5        # volume from the open to now >= 1.5x the 20-day average up to the same time
 # min_block_shares = 300000   # at least one single print of this many shares earlier today
 # min_call_put_ratio = 1.5    # option call / put volume today (stocks without options pass)
+# min_block_count = 2         # at least this many blocks (>= min_block_shares, off-exchange) printed on an
+                              # uptick before the signal, i.e. repeated buyer-initiated blocks
+# Repeated imbalance and ranking.
+# min_buy_print_share = 1.0   # buy side on this share of today's closing-imbalance prints so far (1.0 = every one)
+# rank_by = "move_x_rvol"     # give the evening's slots by day move x relative volume instead of edge.
+                              # With [account] max_positions = 1, only that best idea trades each day.
 
 [activity]                    # where the activity filters get their data
 volume_dataset = "XNAS.BASIC" # 1-minute bars; includes the Nasdaq/FINRA TRF (off-exchange) prints

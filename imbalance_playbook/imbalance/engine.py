@@ -23,6 +23,7 @@ SECONDS_PER_SESSION = 23400     # 6.5-hour regular session
 TRADABLE_VENUES = {"XNAS"}
 
 ET = ZoneInfo("America/New_York")
+CLOSING_IMBALANCE_FROM_S = 600  # Nasdaq publishes closing imbalances from 15:50 ET (600 s before the close)
 IMB_COLUMNS = ["ts", "symbol", "venue", "side", "ref", "near", "far", "paired", "imb"]
 
 
@@ -59,10 +60,11 @@ def snapshot(hist: pd.DataFrame, at: pd.Timestamp, lookback_s: float, max_age_s:
       side_stable  - side unchanged over the look-back window
       shrink       - 1 - imb_now / peak imb over the look-back (same side)
       age_s        - seconds since the latest record
+      buy_share    - share of today's closing-imbalance prints so far that were on the buy side
     """
     h = hist[hist["ts"] <= at]
     if h.empty:
-        return pd.DataFrame(columns=IMB_COLUMNS + ["side_stable", "shrink", "age_s"]).set_index("symbol")
+        return pd.DataFrame(columns=IMB_COLUMNS + ["side_stable", "shrink", "age_s", "buy_share"]).set_index("symbol")
     last = h.groupby("symbol").tail(1).set_index("symbol")
     recent = h[h["ts"] > at - pd.Timedelta(seconds=lookback_s)]
     sides = recent.groupby("symbol")["side"].nunique()
@@ -74,6 +76,7 @@ def snapshot(hist: pd.DataFrame, at: pd.Timestamp, lookback_s: float, max_age_s:
     last["peak_imb"] = peak.reindex(last.index).fillna(last["imb"])
     last["shrink"] = (1 - last["imb"] / last["peak_imb"]).clip(lower=0).fillna(0)
     last["age_s"] = (at - last["ts"]).dt.total_seconds()
+    last["buy_share"] = h.assign(buy=h["side"] == "B").groupby("symbol")["buy"].mean().reindex(last.index)
     return last
 
 
@@ -127,7 +130,7 @@ def features(snap: pd.DataFrame, universe: pd.DataFrame, cfg: dict, window: str)
     return df
 
 
-ACTIVITY_KEYS = ("min_rel_volume", "min_block_shares", "min_call_put_ratio")
+ACTIVITY_KEYS = ("min_rel_volume", "min_block_shares", "min_block_count", "min_call_put_ratio")
 
 
 def _col(df: pd.DataFrame, name: str) -> pd.Series:
@@ -154,6 +157,7 @@ def apply_filters(df: pd.DataFrame, cfg: dict, window: str) -> pd.DataFrame:
         ("shrinking", df["shrink"] > sig["max_shrink"]),
         ("not up enough today", df["day_move"] < sig.get("min_day_move", -np.inf)),
         ("move small vs sigma", df["move_sigma"] < sig.get("min_move_to_sigma", -np.inf)),
+        ("imbalance not repeated", _col(df, "buy_share") < sig.get("min_buy_print_share", -np.inf)),
     ]
     if window == "B":
         rules += [
@@ -166,6 +170,8 @@ def apply_filters(df: pd.DataFrame, cfg: dict, window: str) -> pd.DataFrame:
         rules += [("low rel volume", _col(df, "rel_volume") < sig["min_rel_volume"])]
     if "min_block_shares" in sig:
         rules += [("no block trade", _col(df, "max_block") < sig["min_block_shares"])]
+    if "min_block_count" in sig:
+        rules += [("blocks not repeated", _col(df, "buy_blocks") < sig["min_block_count"])]
     if "min_call_put_ratio" in sig:
         rules += [("call/put low", _col(df, "cp_ratio").fillna(np.inf) < sig["min_call_put_ratio"])]
     rules += [("edge < min", df["edge"] * 1e4 < sig["min_edge_bps"])]
@@ -203,9 +209,21 @@ def entry_limit(row: pd.Series, cfg: dict) -> float:
     return math.ceil(px * 100 - 1e-9) / 100
 
 
+def rank_score(df: pd.DataFrame, rank_by: str) -> pd.Series:
+    """Order in which ideas get the tonight's slots: `edge`, or `move_x_rvol` = day move x relative volume."""
+    if rank_by == "edge":
+        return df["edge"].astype(float)
+    if rank_by == "move_x_rvol":
+        return df["day_move"].astype(float) * _col(df, "rel_volume")
+    raise ValueError(f"rank_by must be 'edge' or 'move_x_rvol', not {rank_by!r}")
+
+
 def pick_trades(df: pd.DataFrame, cfg: dict, window: str, secs_to_close: float,
                 issued: dict[str, float] | None = None) -> pd.DataFrame:
     """Watch list (top_n buy imbalances by $) with TRADE rows sized and capped.
+
+    Ideas that pass every rule get the slots in `rank_by` order (default: edge). With
+    max_positions = 1 that is the single best idea of the evening.
 
     `issued` is the session ledger {symbol: $ notional} of ideas already given
     earlier tonight. Caps (max_positions, max_gross_usd) count those too, and a
@@ -222,7 +240,8 @@ def pick_trades(df: pd.DataFrame, cfg: dict, window: str, secs_to_close: float,
     held = watch.index.isin(list(issued))
     watch.loc[held, ["action", "reason"]] = ["held", "bought earlier: keep its exit"]
     gross, n = float(sum(issued.values())), len(issued)
-    for sym in watch[watch["ok"] & ~held].sort_values("edge", ascending=False).index:
+    watch["score"] = rank_score(watch, sig.get("rank_by", "edge"))
+    for sym in watch[watch["ok"] & ~held].sort_values("score", ascending=False, na_position="last").index:
         row = watch.loc[sym]
         if row["venue"] not in TRADABLE_VENUES:
             watch.loc[sym, ["action", "reason"]] = ["watch", "venue exit rules"]
@@ -273,7 +292,8 @@ def activity_candidates(hist: pd.DataFrame, universe: pd.DataFrame, cfg: dict, w
 
 
 def needs_activity(cfg: dict) -> bool:
-    return any(k in cfg["signal"] for k in ACTIVITY_KEYS)
+    sig = cfg["signal"]
+    return any(k in sig for k in ACTIVITY_KEYS) or sig.get("rank_by") == "move_x_rvol"
 
 
 # --------------------------------------------------------------------------- activity measures
@@ -310,6 +330,26 @@ def max_block(trades: pd.DataFrame, at: pd.Timestamp, publisher_ids: list[int] |
     if publisher_ids is not None:
         t = t[t["publisher_id"].isin(publisher_ids)]
     return t.groupby("symbol")["size"].max().astype(float).rename("max_block")
+
+
+def buy_blocks(trades: pd.DataFrame, at: pd.Timestamp, min_shares: float,
+               publisher_ids: list[int] | None = None) -> pd.Series:
+    """symbol -> number of block prints (>= min_shares) before `at` that look buyer-initiated.
+
+    Block prints don't say who initiated them, so this uses the tick test: a print above the last
+    different price before it (an uptick, or a repeat of an uptick price) counts as a buy. Every print
+    sets the tick; only prints from `publisher_ids` (the off-exchange TRFs) count as blocks.
+    """
+    if trades.empty:
+        return pd.Series(dtype=float)
+    t = trades.assign(ts=pd.to_datetime(trades["ts_event"], utc=True))
+    t = t[t["ts"] < at].sort_values("ts", kind="stable")
+    tick = np.sign(t.groupby("symbol")["price"].diff()).replace(0, np.nan)
+    t["up"] = tick.groupby(t["symbol"]).ffill() > 0
+    blocks = t[(t["size"] >= min_shares) & t["up"]]
+    if publisher_ids is not None:
+        blocks = blocks[blocks["publisher_id"].isin(publisher_ids)]
+    return blocks.groupby("symbol").size().reindex(t["symbol"].unique(), fill_value=0).astype(float).rename("buy_blocks")
 
 
 def call_put_ratio(options: pd.DataFrame) -> pd.Series:
