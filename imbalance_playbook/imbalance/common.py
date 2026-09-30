@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 import tomllib
 from zoneinfo import ZoneInfo
 
@@ -79,11 +80,23 @@ class Fetcher:
                 sys.exit("Cancelled. Nothing was bought.")
         self.spent_estimate += estimate_usd
 
+    RETRY_WAITS_S = (2, 8, 30)   # a busy Databento gateway sometimes answers 502/503/504
+
+    def _get_range_with_retry(self, req: dict):
+        for wait in (*self.RETRY_WAITS_S, None):
+            try:
+                return self.client.timeseries.get_range(**req)
+            except Exception as e:
+                if wait is None or not 500 <= (getattr(e, "http_status", None) or 0) < 600:
+                    raise
+                print(f"  Databento {e.http_status}; retrying in {wait}s", flush=True)
+                time.sleep(wait)
+
     def get(self, **req) -> pd.DataFrame:
         path = self._path(req)
         if path.exists():
             return pd.read_pickle(path)
-        store = self.client.timeseries.get_range(**req)
+        store = self._get_range_with_retry(req)
         df = store.to_df()
         df = df.reset_index() if df.index.name else df
         # An empty answer is cached only when the period is long over (a weekend, a holiday).

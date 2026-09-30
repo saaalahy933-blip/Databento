@@ -177,6 +177,42 @@ def test_parallel_prefetch_buys_nothing_extra(tmp_path, monkeypatch):
     assert runs[8][1] == runs[1][1]                                # same trades
 
 
+class _Flaky:
+    """get_range fails with the given HTTP statuses, then answers like the fake API."""
+
+    def __init__(self, statuses):
+        self.statuses, self.fake = list(statuses), F.FakeHistorical()
+        self.metadata, self.attempts = self.fake.metadata, 0
+        self.timeseries = F.NS(get_range=self._get_range)
+
+    def _get_range(self, **req):
+        self.attempts += 1
+        if self.statuses:
+            raise F.db.BentoServerError(http_status=self.statuses.pop(0), message="flaky")
+        return self.fake.timeseries.get_range(**req)
+
+
+def test_server_errors_are_retried_then_succeed(tmp_path, monkeypatch):
+    monkeypatch.setattr(C.Fetcher, "RETRY_WAITS_S", (0, 0, 0))
+    client = _Flaky([504, 502])
+    f = C.Fetcher(client, tmp_path, max_usd=100, assume_yes=True)
+    df = f.get(**C.req_definitions("XNAS.ITCH", dt.date(2026, 9, 4)))
+    assert not df.empty and client.attempts == 3
+
+
+def test_client_errors_and_persistent_server_errors_are_raised(tmp_path, monkeypatch):
+    monkeypatch.setattr(C.Fetcher, "RETRY_WAITS_S", (0, 0, 0))
+    req = C.req_definitions("XNAS.ITCH", dt.date(2026, 9, 4))
+    client = _Flaky([400])
+    with pytest.raises(F.db.BentoServerError):
+        C.Fetcher(client, tmp_path / "a", max_usd=100, assume_yes=True).get(**req)
+    assert client.attempts == 1                                    # a 4xx is never retried
+    client = _Flaky([504] * 4)
+    with pytest.raises(F.db.BentoServerError):
+        C.Fetcher(client, tmp_path / "b", max_usd=100, assume_yes=True).get(**req)
+    assert client.attempts == 4                                    # 3 retries, then give up
+
+
 def test_listings_on_a_monday_holiday_step_back_to_friday(tmp_path, monkeypatch):
     from imbalance import build as B
     assert B.weekdays_back(dt.date(2026, 9, 7), 3) == [dt.date(2026, 9, 7), dt.date(2026, 9, 4), dt.date(2026, 9, 3)]
