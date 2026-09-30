@@ -164,6 +164,19 @@ def test_backtest_end_to_end(tmp_path, monkeypatch):
     assert fake2.calls == []
 
 
+def test_parallel_prefetch_buys_nothing_extra(tmp_path, monkeypatch):
+    import backtest
+    runs = {}
+    for workers in (1, 8):
+        monkeypatch.setattr(C, "ROOT", tmp_path / str(workers))
+        fake = F.FakeHistorical()
+        f = C.Fetcher(fake, tmp_path / str(workers), max_usd=100, assume_yes=True)
+        trades, _ = backtest.backtest(f, CFG, dt.date(2026, 9, 8), dt.date(2026, 9, 29), workers=workers)
+        runs[workers] = (sorted(fake.calls), trades.sort_index().to_csv())
+    assert runs[8][0] == runs[1][0]                                # same requests, none twice
+    assert runs[8][1] == runs[1][1]                                # same trades
+
+
 def test_listings_on_a_monday_holiday_step_back_to_friday(tmp_path, monkeypatch):
     from imbalance import build as B
     assert B.weekdays_back(dt.date(2026, 9, 7), 3) == [dt.date(2026, 9, 7), dt.date(2026, 9, 4), dt.date(2026, 9, 3)]
