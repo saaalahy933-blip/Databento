@@ -127,6 +127,42 @@ def test_momentum_filters_by_hand():
     assert E.apply_filters(feat, CFG, "A").loc["FLAT", "reason"] != "not up enough today"   # off by default
 
 
+def test_activity_measures_by_hand():
+    day, prev = dt.date(2026, 9, 29), dt.date(2026, 9, 28)
+    at = pd.Timestamp("2026-09-29 15:53", tz=C.ET).tz_convert("UTC")
+    bar = lambda d, hhmm, s, v: (pd.Timestamp(f"{d} {hhmm}", tz=C.ET).tz_convert("UTC"), s, v)
+    bars = pd.DataFrame([bar(prev, "10:00", "X", 100), bar(prev, "15:59", "X", 10_000),   # after 15:53: ignored
+                         bar(day, "09:00", "X", 10_000),                                     # pre-market: ignored
+                         bar(day, "10:00", "X", 250), bar(day, "15:54", "X", 10_000)],
+                        columns=["ts_event", "symbol", "volume"])
+    assert E.rel_volume(bars, day, at, 20, 1)["X"] == pytest.approx(2.5)
+    assert np.isnan(E.rel_volume(bars, day, at, 20, 2)["X"])                  # too little history
+    trades = pd.DataFrame({"ts_event": [at - pd.Timedelta(hours=1), at + pd.Timedelta(seconds=1)],
+                           "symbol": ["X", "X"], "size": [300_000, 900_000]})
+    assert E.max_block(trades, at)["X"] == 300_000                            # the later print is in the future
+    opts = pd.DataFrame({"symbol": [F.osi("X", "C"), F.osi("X", "P"), F.osi("Y", "C"), "junk"],
+                         "volume": [300, 100, 50, 999]})
+    cp = E.call_put_ratio(opts)
+    assert cp["X"] == pytest.approx(3.0) and cp["Y"] == np.inf
+
+
+def test_network_timeouts_are_retried(tmp_path, monkeypatch):
+    import requests
+    monkeypatch.setattr(C.Fetcher, "RETRY_WAITS_S", (0, 0, 0))
+    client = _Flaky([])
+    calls = {"n": 0}
+    real = client.timeseries.get_range
+
+    def get_range(**req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise requests.ReadTimeout("read timed out")
+        return real(**req)
+    client.timeseries = F.NS(get_range=get_range)
+    df = C.Fetcher(client, tmp_path, max_usd=100, assume_yes=True).get(**C.req_definitions("XNAS.ITCH", dt.date(2026, 9, 4)))
+    assert not df.empty and calls["n"] == 2
+
+
 def test_bad_data_never_trades():
     h = hist_rows([(T0, "AAAA", "XNAS", "B", 5.00, np.nan, np.nan, 200_000, np.nan)])     # undefined imbalance
     out = E.run_window(h, uni(), CFG, "A", T0, CLOSE)
@@ -244,6 +280,26 @@ def test_listings_on_a_monday_holiday_step_back_to_friday(tmp_path, monkeypatch)
     listings = B.fetch_listings(f, CFG, [labor_day], "test")      # a weekend request would raise a 504
     assert listings[labor_day]["AAAA"] == "XNAS"
     assert len(fake.calls) == 2                                    # Mon (empty), then Fri
+
+
+def test_backtest_with_activity_filters(tmp_path, monkeypatch):
+    import backtest
+    on = {"min_rel_volume": 1.5, "min_block_shares": 300_000, "min_call_put_ratio": 1.5}
+    runs = {}
+    for name, extra in {"on": {}, "big block": {"min_block_shares": 500_000}}.items():
+        monkeypatch.setattr(C, "ROOT", tmp_path / name)
+        cfg = {**CFG, "signal": {**CFG["signal"], **on, **extra}}
+        fake = F.FakeHistorical()
+        f = C.Fetcher(fake, tmp_path / name, max_usd=100, assume_yes=True)
+        trades, _ = backtest.backtest(f, cfg, dt.date(2026, 9, 8), dt.date(2026, 9, 29))
+        runs[name] = (trades[~trades["missed"]], fake)
+    filled, fake = runs["on"]
+    assert set(filled.index) == {"AAAA"} and set(filled["window"]) == {"A"}   # 3x volume, 400k block, calls 2:1
+    asked = {c for c in fake.calls if c[1] in ("ohlcv-1m", "trades") or c[0] == "OPRA.PILLAR"}
+    assert asked == {("XNAS.BASIC", "ohlcv-1m"), ("XNAS.BASIC", "trades"), ("OPRA.PILLAR", "ohlcv-1d")}
+    filled, _ = runs["big block"]
+    # no 500k print before 15:53, but the 900k print at 15:54:30 counts for the 15:56 window
+    assert set(filled.index) == {"AAAA"} and set(filled["window"]) == {"B"}
 
 
 def test_ticker_called_NA_survives_csv(tmp_path):

@@ -47,6 +47,17 @@ max_shrink = 0.50             # drop if imbalance has shrunk >50% from its recen
 # Momentum filters (comment out to switch off). Both use the auction reference price vs yesterday's close.
 # min_day_move = 0.03         # stock already up at least 3% today
 # min_move_to_sigma = 1.5     # and that move is at least 1.5x its normal daily move (20-day sigma)
+# Activity filters (comment out to switch off). Each needs data bought for the candidates only (see [activity]).
+# min_rel_volume = 1.5        # volume from the open to now >= 1.5x the 20-day average up to the same time
+# min_block_shares = 300000   # at least one single print of this many shares earlier today
+# min_call_put_ratio = 1.5    # option call / put volume today (stocks without options pass)
+
+[activity]                    # where the activity filters get their data
+volume_dataset = "XNAS.BASIC" # 1-minute bars; includes the Nasdaq/FINRA TRF (off-exchange) prints
+trades_dataset = "XNAS.BASIC" # individual prints, so block trades done off-exchange count
+options_dataset = "OPRA.PILLAR"
+rel_volume_days = 20
+min_volume_days = 10          # fewer prior sessions than this = no relative volume (fails the filter)
 
 [costs]
 commission_per_share = 0.0035

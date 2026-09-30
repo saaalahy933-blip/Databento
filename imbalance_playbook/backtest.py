@@ -138,18 +138,44 @@ def main() -> None:
              a.workers)
 
 
-def prefetch(f: C.Fetcher, reqs: list[dict], workers: int) -> None:
+def prefetch(f: C.Fetcher, reqs: list[dict], workers: int, get=None) -> None:
     """Download (and cache) many requests at once; the day-by-day loop then reads them from the cache."""
     todo = [r for r in reqs if not f.cached(r)]
     if workers <= 1 or not todo:
         return
+    get = get or (lambda r: f.get(**r))
     print(f"  downloading {len(todo):,} requests, {workers} at a time")
     done = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for _ in pool.map(lambda r: f.get(**r), todo):
+        for _ in pool.map(get, todo):
             done += 1
             if done % 100 == 0 or done == len(todo):
                 print(f"  {done:,}/{len(todo):,} downloaded")
+
+
+def plan_activity(f: C.Fetcher, cfg: dict, plan: list, windows: str, offsets: dict, fetch_back: dict,
+                  all_dates: list, workers: int) -> dict:
+    """session -> (candidate symbols, data end time, prior sessions); quotes, asks once, then downloads."""
+    out, reqs = {}, []
+    for d, uni, close_at, *_ in plan:
+        syms, last_at = set(), None
+        for w in windows:
+            at = close_at - pd.Timedelta(seconds=offsets[w])
+            hist = B.imbalance_history(f, cfg, uni, at - pd.Timedelta(seconds=fetch_back[w]), at + pd.Timedelta(seconds=1))
+            syms |= set(E.activity_candidates(hist, uni, cfg, w, at))
+            last_at = at if last_at is None else max(last_at, at)
+        if syms:
+            prior = [x for x in all_dates if x < d]
+            out[d] = (sorted(syms), last_at, prior)
+            reqs += B.activity_requests(cfg, sorted(syms), d, last_at, prior)
+    if not reqs:
+        return out
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        cost = sum(pool.map(lambda r: B.quote_lenient(f, r), reqs))
+    n = sum(len(v[0]) for v in out.values())
+    f.approve(cost, f"activity data (volume / block trades / options) for {n:,} candidate stock-days")
+    prefetch(f, reqs, workers, get=lambda r: B.get_lenient(f, r))
+    return out
 
 
 def backtest(f: C.Fetcher, cfg: dict, start: dt.date, end: dt.date, windows: str = "AB",
@@ -197,6 +223,10 @@ def backtest(f: C.Fetcher, cfg: dict, start: dt.date, end: dt.date, windows: str
     # imbalance + closing prices in parallel; the fill-check quotes depend on the ideas, so they stay in the loop
     prefetch(f, [r for p in plan for r in p[5]], workers)
 
+    # 3b. optional activity filters: buy their data only for stocks that pass every other rule
+    activity = plan_activity(f, cfg, plan, windows, offsets, fetch_back, sorted(stats["prev_close"].index), workers) \
+        if E.needs_activity(cfg) else {}
+
     # 4. run the engine day by day with one ledger per session
     trades, calib = [], []
     for i, (d, uni, close_at, by_venue, _, _) in enumerate(plan, 1):
@@ -208,7 +238,11 @@ def backtest(f: C.Fetcher, cfg: dict, start: dt.date, end: dt.date, windows: str
             hist = B.imbalance_history(f, cfg, uni, at - pd.Timedelta(seconds=fetch_back[w]), at + pd.Timedelta(seconds=1))
             if hist.empty:
                 continue  # holiday / half-day / no data
-            ideas = E.run_window(hist, uni, cfg, w, at, close_at, issued)
+            u = uni
+            if d in activity:
+                syms, until, prior = activity[d]
+                u = uni.join(B.fetch_activity(f, cfg, syms, d, at, until, prior))
+            ideas = E.run_window(hist, u, cfg, w, at, close_at, issued)
             if ideas.empty:
                 continue
             new = ideas[ideas["action"] == "TRADE"]

@@ -155,3 +155,66 @@ def build_universe(f: C.Fetcher, cfg: dict, session: dt.date, listing_date: dt.d
     bars = bars[bars["date"] < session]
     stats = stats_with_row(bars, cfg, session)
     return E.universe_for(stats, session, listing_for(listings, session), cfg)
+
+
+# --------------------------------------------------------------------------- activity filters (optional)
+def activity_requests(cfg: dict, symbols: list[str], session: dt.date, until: pd.Timestamp,
+                      prior_dates: list[dt.date]) -> list[dict]:
+    """Data for the activity filters that are switched on, for `symbols` on `session` up to `until`."""
+    a, sig = cfg["activity"], cfg["signal"]
+    if not symbols:
+        return []
+    out = []
+    if "min_rel_volume" in sig:
+        first = (prior_dates[-a["rel_volume_days"]:] or [session])[0]
+        out.append(C.req_minute_bars(a["volume_dataset"], symbols, C.session_open(first), until))
+    if "min_block_shares" in sig:
+        out.append(C.req_trades(a["trades_dataset"], symbols, C.session_open(session), until))
+    if "min_call_put_ratio" in sig:
+        out.append(C.req_option_volume(a["options_dataset"], symbols, session))
+    return out
+
+
+def _rejected(e: Exception) -> bool:
+    return getattr(e, "http_status", None) == 422     # e.g. a stock with no listed options
+
+
+def get_lenient(f: C.Fetcher, req: dict) -> pd.DataFrame:
+    """f.get, but if Databento rejects the symbol list, ask symbol by symbol and skip the ones it can't resolve."""
+    try:
+        return f.get(**req)
+    except Exception as e:
+        if not _rejected(e):
+            raise
+    if len(req["symbols"]) == 1:
+        return pd.DataFrame()
+    parts = [get_lenient(f, {**req, "symbols": [s]}) for s in req["symbols"]]
+    parts = [p for p in parts if not p.empty]
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
+def quote_lenient(f: C.Fetcher, req: dict) -> float:
+    try:
+        return f.quote(req)
+    except Exception as e:
+        if not _rejected(e):
+            raise
+    if len(req["symbols"]) == 1:
+        return 0.0
+    return sum(quote_lenient(f, {**req, "symbols": [s]}) for s in req["symbols"])
+
+
+def fetch_activity(f: C.Fetcher, cfg: dict, symbols: list[str], session: dt.date, at: pd.Timestamp,
+                   until: pd.Timestamp, prior_dates: list[dt.date]) -> pd.DataFrame:
+    """symbol -> rel_volume, max_block, cp_ratio (only the switched-on ones), measured before `at`."""
+    a = cfg["activity"]
+    out = pd.DataFrame(index=pd.Index(symbols, name="symbol"))
+    for req in activity_requests(cfg, symbols, session, until, prior_dates):
+        raw = get_lenient(f, req)
+        if req["schema"] == "ohlcv-1m":
+            out["rel_volume"] = E.rel_volume(raw, session, at, a["rel_volume_days"], a["min_volume_days"]).reindex(out.index)
+        elif req["schema"] == "trades":
+            out["max_block"] = E.max_block(raw, at).reindex(out.index)
+        else:
+            out["cp_ratio"] = E.call_put_ratio(raw).reindex(out.index)
+    return out

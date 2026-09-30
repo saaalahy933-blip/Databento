@@ -10,6 +10,7 @@ Pipeline for one decision time T:
 from __future__ import annotations
 
 import math
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -21,6 +22,7 @@ SECONDS_PER_SESSION = 23400     # 6.5-hour regular session
 # starts — so NYSE / NYSE American names are shown as WATCH, never TRADE.
 TRADABLE_VENUES = {"XNAS"}
 
+ET = ZoneInfo("America/New_York")
 IMB_COLUMNS = ["ts", "symbol", "venue", "side", "ref", "near", "far", "paired", "imb"]
 
 
@@ -125,6 +127,13 @@ def features(snap: pd.DataFrame, universe: pd.DataFrame, cfg: dict, window: str)
     return df
 
 
+ACTIVITY_KEYS = ("min_rel_volume", "min_block_shares", "min_call_put_ratio")
+
+
+def _col(df: pd.DataFrame, name: str) -> pd.Series:
+    return df[name].astype(float) if name in df else pd.Series(np.nan, index=df.index)
+
+
 def apply_filters(df: pd.DataFrame, cfg: dict, window: str) -> pd.DataFrame:
     """Add `reason` (first rule that fails, '' if none) and `ok`."""
     if df.empty:
@@ -151,6 +160,14 @@ def apply_filters(df: pd.DataFrame, cfg: dict, window: str) -> pd.DataFrame:
             ("no near price", df["near"].isna()),
             ("gap too wide", df["near_gap"] > sig["max_near_gap"]),
         ]
+    # activity filters: need data fetched for the day (see build.fetch_activity); missing data fails,
+    # except the call/put ratio, which only applies to stocks that traded options that day
+    if "min_rel_volume" in sig:
+        rules += [("low rel volume", _col(df, "rel_volume") < sig["min_rel_volume"])]
+    if "min_block_shares" in sig:
+        rules += [("no block trade", _col(df, "max_block") < sig["min_block_shares"])]
+    if "min_call_put_ratio" in sig:
+        rules += [("call/put low", _col(df, "cp_ratio").fillna(np.inf) < sig["min_call_put_ratio"])]
     rules += [("edge < min", df["edge"] * 1e4 < sig["min_edge_bps"])]
     reason = pd.Series("", index=df.index)
     for name, mask in rules:
@@ -241,6 +258,69 @@ def run_window(hist: pd.DataFrame, universe: pd.DataFrame, cfg: dict, window: st
     feat = features(snap, universe, cfg, window)
     filt = apply_filters(feat, cfg, window)
     return pick_trades(filt, cfg, window, (close_at - at).total_seconds(), issued)
+
+
+def activity_candidates(hist: pd.DataFrame, universe: pd.DataFrame, cfg: dict, window: str,
+                        at: pd.Timestamp) -> list[str]:
+    """Symbols that pass every rule except the activity filters: the only ones worth buying activity data for."""
+    sig = cfg["signal"]
+    base = {**cfg, "signal": {k: v for k, v in sig.items() if k not in ACTIVITY_KEYS}}
+    lookback = sig["lookback_a_s"] if window == "A" else sig["lookback_b_s"]
+    filt = apply_filters(features(snapshot(hist, at, lookback, sig["max_age_s"]), universe, base, window), base, window)
+    if filt.empty:
+        return []
+    return sorted(filt.index[filt["ok"] & (filt["side"] == sig["side"])])
+
+
+def needs_activity(cfg: dict) -> bool:
+    return any(k in cfg["signal"] for k in ACTIVITY_KEYS)
+
+
+# --------------------------------------------------------------------------- activity measures
+def rel_volume(bars: pd.DataFrame, session, at: pd.Timestamp, n_days: int, min_days: int) -> pd.Series:
+    """symbol -> volume from the open to `at`'s time of day, today / average of the prior n_days sessions.
+
+    bars: 1-minute bars with ts_event, symbol, volume (any venues; only the ratio is used).
+    """
+    if bars.empty:
+        return pd.Series(dtype=float)
+    ts = pd.to_datetime(bars["ts_event"], utc=True).dt.tz_convert(ET)
+    tod = ts - ts.dt.normalize()
+    at_et = at.tz_convert(ET)
+    cutoff = at_et - at_et.normalize()
+    keep = (tod >= pd.Timedelta(hours=9, minutes=30)) & (tod < cutoff)
+    df = pd.DataFrame({"date": ts.dt.date, "symbol": bars["symbol"], "volume": bars["volume"].astype(float)})[keep]
+    daily = df.pivot_table(index="date", columns="symbol", values="volume", aggfunc="sum").fillna(0.0)
+    if session not in daily.index:
+        return pd.Series(np.nan, index=daily.columns)
+    prior = daily[daily.index < session].tail(n_days)
+    if len(prior) < min_days:
+        return pd.Series(np.nan, index=daily.columns, name="rel_volume")
+    avg = prior.mean()
+    return (daily.loc[session] / avg.where(avg > 0)).rename("rel_volume")
+
+
+def max_block(trades: pd.DataFrame, at: pd.Timestamp) -> pd.Series:
+    """symbol -> largest single print (shares) before `at`."""
+    if trades.empty:
+        return pd.Series(dtype=float)
+    t = trades[pd.to_datetime(trades["ts_event"], utc=True) < at]
+    return t.groupby("symbol")["size"].max().astype(float).rename("max_block")
+
+
+def call_put_ratio(options: pd.DataFrame) -> pd.Series:
+    """underlying -> total call volume / total put volume, from OSI contract symbols ('ROOT  YYMMDDC00012500')."""
+    if options.empty:
+        return pd.Series(dtype=float)
+    osi = options["symbol"].astype(str).str.extract(r"^(?P<root>.{1,6}?)\s*(?P<exp>\d{6})(?P<cp>[CP])\d{8}$")
+    df = pd.DataFrame({"root": osi["root"].str.strip(), "cp": osi["cp"], "volume": options["volume"].astype(float)})
+    df = df.dropna(subset=["cp"])
+    if df.empty:
+        return pd.Series(dtype=float)
+    vol = df.pivot_table(index="root", columns="cp", values="volume", aggfunc="sum").reindex(columns=["C", "P"]).fillna(0)
+    ratio = vol["C"] / vol["P"].where(vol["P"] > 0)
+    ratio[(vol["P"] == 0) & (vol["C"] > 0)] = np.inf
+    return ratio.rename("cp_ratio")
 
 
 def record_issued(ideas: pd.DataFrame, issued: dict[str, float]) -> None:

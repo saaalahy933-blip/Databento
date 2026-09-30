@@ -12,6 +12,7 @@ import tomllib
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import requests
 from dotenv import load_dotenv
 
 ET = ZoneInfo("America/New_York")
@@ -87,9 +88,10 @@ class Fetcher:
             try:
                 return call()
             except Exception as e:
-                if wait is None or not 500 <= (getattr(e, "http_status", None) or 0) < 600:
+                network = isinstance(e, (requests.Timeout, requests.ConnectionError))
+                if wait is None or not (network or 500 <= (getattr(e, "http_status", None) or 0) < 600):
                     raise
-                print(f"  Databento {e.http_status}; retrying in {wait}s", flush=True)
+                print(f"  Databento {getattr(e, 'http_status', None) or type(e).__name__}; retrying in {wait}s", flush=True)
                 time.sleep(wait)
 
     def get(self, **req) -> pd.DataFrame:
@@ -141,6 +143,27 @@ def req_closes(dataset: str, symbols: list[str], close_at: pd.Timestamp) -> dict
     return dict(dataset=dataset, schema="statistics", symbols=sorted(symbols),
                 start=(close_at - pd.Timedelta(minutes=1)).isoformat(),
                 end=(close_at + pd.Timedelta(minutes=5)).isoformat())
+
+
+def req_minute_bars(dataset: str, symbols: list[str], start: pd.Timestamp, end: pd.Timestamp) -> dict:
+    return dict(dataset=dataset, schema="ohlcv-1m", symbols=sorted(symbols),
+                start=start.isoformat(), end=end.isoformat())
+
+
+def req_trades(dataset: str, symbols: list[str], start: pd.Timestamp, end: pd.Timestamp) -> dict:
+    return dict(dataset=dataset, schema="trades", symbols=sorted(symbols),
+                start=start.isoformat(), end=end.isoformat())
+
+
+def req_option_volume(dataset: str, underlyings: list[str], date: dt.date) -> dict:
+    """Whole-day volume of every option contract on these underlyings (parent symbology)."""
+    start = pd.Timestamp(date, tz="UTC")
+    return dict(dataset=dataset, schema="ohlcv-1d", symbols=sorted(f"{u}.OPT" for u in underlyings),
+                stype_in="parent", start=start.isoformat(), end=(start + pd.Timedelta(days=1)).isoformat())
+
+
+def session_open(date: dt.date) -> pd.Timestamp:
+    return pd.Timestamp(dt.datetime(date.year, date.month, date.day, 9, 30, tzinfo=ET)).tz_convert("UTC")
 
 
 # --------------------------------------------------------------------------- parsers
