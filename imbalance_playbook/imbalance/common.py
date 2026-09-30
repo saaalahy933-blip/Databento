@@ -36,10 +36,29 @@ def fmt_times(ts: pd.Timestamp) -> str:
 
 # --------------------------------------------------------------------------- Databento access
 def api_key() -> str:
-    key = os.environ.get("DATABENTO_API_KEY", "").strip()
+    """DATABENTO_API_KEY from the environment, else from .env next to config.toml (git ignores .env)."""
+    key = os.environ.get("DATABENTO_API_KEY", "").strip() or dotenv_value(ROOT / ".env", "DATABENTO_API_KEY")
     if not key:
-        sys.exit("Set your key first:  export DATABENTO_API_KEY=db-...   (Windows: setx DATABENTO_API_KEY db-...)")
+        sys.exit("Set your key first: copy .env.example to .env and put your key after DATABENTO_API_KEY=\n"
+                 "or:  export DATABENTO_API_KEY=db-...   (Windows: setx DATABENTO_API_KEY db-...)")
     return key
+
+
+def dotenv_value(path: pathlib.Path, name: str) -> str:
+    """`name` from a KEY=value file like .env ('' if missing). Handles export, quotes, # comments, BOM."""
+    try:
+        lines = pathlib.Path(path).read_text(encoding="utf-8-sig").splitlines()
+    except FileNotFoundError:
+        return ""
+    value = ""
+    for line in lines:
+        k, sep, v = line.partition("=")
+        k = k.strip()
+        if k.startswith("export "):
+            k = k[len("export "):].strip()
+        if sep and k == name:
+            value = v.split("#", 1)[0].strip().strip("'\"")
+    return value
 
 
 class Fetcher:

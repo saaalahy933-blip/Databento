@@ -138,6 +138,21 @@ def test_uk_times_across_dst_mismatch():
     assert C.fmt_times(C.close_time(dt.date(2026, 9, 29))) == "16:00:00 ET / 21:00:00 UK"
 
 
+def test_api_key_from_env_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(C, "ROOT", tmp_path)
+    monkeypatch.delenv("DATABENTO_API_KEY", raising=False)
+    with pytest.raises(SystemExit):                                 # no key anywhere: stop
+        C.api_key()
+    (tmp_path / ".env").write_text("DATABENTO_API_KEY=\n", encoding="utf-8")
+    with pytest.raises(SystemExit):                                 # the untouched template is not a key
+        C.api_key()
+    (tmp_path / ".env").write_text("﻿# my key\r\nexport DATABENTO_API_KEY = 'db-fromfile'  # new\r\n",
+                                   encoding="utf-8")
+    assert C.api_key() == "db-fromfile"                             # Windows BOM/CRLF, export, quotes, comment
+    monkeypatch.setenv("DATABENTO_API_KEY", "db-fromshell")
+    assert C.api_key() == "db-fromshell"                            # a key set in the shell wins over .env
+
+
 # ------------------------------------------------------------------ end to end on fake Databento
 def test_backtest_end_to_end(tmp_path, monkeypatch):
     import backtest
