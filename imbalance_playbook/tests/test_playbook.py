@@ -164,6 +164,18 @@ def test_backtest_end_to_end(tmp_path, monkeypatch):
     assert fake2.calls == []
 
 
+def test_listings_on_a_monday_holiday_step_back_to_friday(tmp_path, monkeypatch):
+    from imbalance import build as B
+    assert B.weekdays_back(dt.date(2026, 9, 7), 3) == [dt.date(2026, 9, 7), dt.date(2026, 9, 4), dt.date(2026, 9, 3)]
+    labor_day = dt.date(2026, 9, 7)
+    monkeypatch.setattr(F, "SESSIONS", [x for x in F.SESSIONS if x != labor_day])
+    fake = F.FakeHistorical()
+    f = C.Fetcher(fake, tmp_path, max_usd=100, assume_yes=True)
+    listings = B.fetch_listings(f, CFG, [labor_day], "test")      # a weekend request would raise a 504
+    assert listings[labor_day]["AAAA"] == "XNAS"
+    assert len(fake.calls) == 2                                    # Mon (empty), then Fri
+
+
 def test_ticker_called_NA_survives_csv(tmp_path):
     import live_signals as L
     p = tmp_path / "u.csv"
