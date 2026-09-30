@@ -198,6 +198,10 @@ def test_server_errors_are_retried_then_succeed(tmp_path, monkeypatch):
     f = C.Fetcher(client, tmp_path, max_usd=100, assume_yes=True)
     df = f.get(**C.req_definitions("XNAS.ITCH", dt.date(2026, 9, 4)))
     assert not df.empty and client.attempts == 3
+    client = _Flaky([503])
+    client.metadata = F.NS(get_cost=lambda **q: client.timeseries.get_range(**q) and 0.5)   # 503 once, then 0.5
+    assert C.Fetcher(client, tmp_path / "q", max_usd=100, assume_yes=True).quote(
+        C.req_definitions("XNAS.ITCH", dt.date(2026, 9, 3))) == 0.5          # cost quotes are retried too
 
 
 def test_client_errors_and_persistent_server_errors_are_raised(tmp_path, monkeypatch):

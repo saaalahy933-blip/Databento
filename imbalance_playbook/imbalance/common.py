@@ -68,7 +68,7 @@ class Fetcher:
         if self.cached(req):
             return 0.0
         q = {k: v for k, v in req.items() if k in ("dataset", "schema", "symbols", "start", "end", "stype_in")}
-        return float(self.client.metadata.get_cost(**q))
+        return float(self._retry(lambda: self.client.metadata.get_cost(**q)))
 
     def approve(self, estimate_usd: float, what: str) -> None:
         print(f"\nEstimated Databento cost for {what}: ${estimate_usd:,.2f} "
@@ -82,10 +82,10 @@ class Fetcher:
 
     RETRY_WAITS_S = (2, 8, 30)   # a busy Databento gateway sometimes answers 502/503/504
 
-    def _get_range_with_retry(self, req: dict):
+    def _retry(self, call):
         for wait in (*self.RETRY_WAITS_S, None):
             try:
-                return self.client.timeseries.get_range(**req)
+                return call()
             except Exception as e:
                 if wait is None or not 500 <= (getattr(e, "http_status", None) or 0) < 600:
                     raise
@@ -96,7 +96,7 @@ class Fetcher:
         path = self._path(req)
         if path.exists():
             return pd.read_pickle(path)
-        store = self._get_range_with_retry(req)
+        store = self._retry(lambda: self.client.timeseries.get_range(**req))
         df = store.to_df()
         df = df.reset_index() if df.index.name else df
         # An empty answer is cached only when the period is long over (a weekend, a holiday).
