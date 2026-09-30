@@ -110,6 +110,145 @@ def test_filters_give_reasons():
     assert out.loc["HIGH", "reason"] == "price band"
 
 
+def test_momentum_filters_by_hand():
+    cfg = {**CFG, "signal": {**CFG["signal"], "min_day_move": 0.03, "min_move_to_sigma": 1.5}}
+    specs = {"FLAT": 5.00, "UP2": 5.10, "UP5": 5.25}              # ref vs prev close 5.00
+    rows = [(T0, s, "XNAS", "B", ref, np.nan, np.nan, 200_000, 300_000) for s, ref in specs.items()]
+    u = pd.DataFrame({s: dict(prev_close=5.0, adv_usd=10e6, sigma=0.04, venue="XNAS") for s in specs}).T
+    u[["prev_close", "adv_usd", "sigma"]] = u[["prev_close", "adv_usd", "sigma"]].astype(float)
+    feat = E.features(E.snapshot(hist_rows(rows), T0, 60, 30), u, cfg, "A")
+    assert feat.loc["UP5", "day_move"] == pytest.approx(0.05)
+    assert feat.loc["UP5", "move_sigma"] == pytest.approx(1.25)   # 5% / 4% sigma
+    out = E.apply_filters(feat, cfg, "A")
+    assert out.loc["FLAT", "reason"] == out.loc["UP2", "reason"] == "not up enough today"
+    assert out.loc["UP5", "reason"] == "move small vs sigma"      # up 5% but sigma is 4%: only 1.25x
+    loose = {**cfg, "signal": {**cfg["signal"], "min_move_to_sigma": 1.2}}
+    assert E.apply_filters(feat, loose, "A").loc["UP5", "reason"] != "move small vs sigma"
+    assert E.apply_filters(feat, CFG, "A").loc["FLAT", "reason"] != "not up enough today"   # off by default
+
+
+def test_activity_measures_by_hand():
+    day, prev = dt.date(2026, 9, 29), dt.date(2026, 9, 28)
+    at = pd.Timestamp("2026-09-29 15:53", tz=C.ET).tz_convert("UTC")
+    bar = lambda d, hhmm, s, v: (pd.Timestamp(f"{d} {hhmm}", tz=C.ET).tz_convert("UTC"), s, v)
+    bars = pd.DataFrame([bar(prev, "10:00", "X", 100), bar(prev, "15:59", "X", 10_000),   # after 15:53: ignored
+                         bar(day, "09:00", "X", 10_000),                                     # pre-market: ignored
+                         bar(day, "10:00", "X", 250), bar(day, "15:54", "X", 10_000)],
+                        columns=["ts_event", "symbol", "volume"])
+    assert E.rel_volume(bars, day, at, 20, 1)["X"] == pytest.approx(2.5)
+    assert np.isnan(E.rel_volume(bars, day, at, 20, 2)["X"])                  # too little history
+    trades = pd.DataFrame({"ts_event": [at - pd.Timedelta(hours=1), at + pd.Timedelta(seconds=1)],
+                           "symbol": ["X", "X"], "size": [300_000, 900_000]})
+    assert E.max_block(trades, at)["X"] == 300_000                            # the later print is in the future
+    opts = pd.DataFrame({"symbol": [F.osi("X", "C"), F.osi("X", "P"), F.osi("Y", "C"), "junk"],
+                         "volume": [300, 100, 50, 999]})
+    cp = E.call_put_ratio(opts)
+    assert cp["X"] == pytest.approx(3.0) and cp["Y"] == np.inf
+
+
+def test_opening_cross_on_the_exchange_is_not_a_block():
+    at = pd.Timestamp("2026-09-29 15:53", tz=C.ET).tz_convert("UTC")
+    ts = lambda hhmm: pd.Timestamp(f"2026-09-29 {hhmm}", tz=C.ET).tz_convert("UTC")
+    trades = pd.DataFrame({"ts_event": [ts("09:30"), ts("11:00"), ts("09:30"), ts("12:00")],
+                           "symbol": ["X", "X", "Y", "Y"], "size": [900_000, 120_000, 900_000, 350_000],
+                           "publisher_id": [81, 82, 81, 83]})
+    trf = E.max_block(trades, at, [82, 83])
+    assert trf["X"] == 120_000 and trf["Y"] == 350_000
+    assert E.max_block(trades, at)["X"] == 900_000                            # without the filter the cross counts
+    assert CFG["activity"]["block_publisher_ids"] == [82, 83]
+
+
+def test_repeated_imbalance_blocks_and_best_idea_by_hand():
+    s = lambda sec: T0 - pd.Timedelta(seconds=sec)
+    rows = [(s(150), "X", "XNAS", "A", 5.2, np.nan, np.nan, 200_000, 300_000)]   # sold earlier, before the look-back
+    rows += [(s(k), sym, "XNAS", "B", 5.2, np.nan, np.nan, 200_000, 300_000) for k in (120, 60, 0) for sym in "XY"]
+    u = pd.DataFrame({sym: dict(prev_close=5.0, adv_usd=10e6, sigma=0.04, venue="XNAS") for sym in "XY"}).T
+    u[["prev_close", "adv_usd", "sigma"]] = u[["prev_close", "adv_usd", "sigma"]].astype(float)
+    feat = E.features(E.snapshot(hist_rows(rows), T0, 60, 30), u, CFG, "A")
+    assert feat.loc["X", "buy_share"] == pytest.approx(0.75) and feat.loc["Y", "buy_share"] == 1.0
+    rep = {**CFG, "signal": {**CFG["signal"], "min_buy_print_share": 1.0}}
+    out = E.apply_filters(feat, rep, "A")
+    assert out.loc["X", "reason"] == "imbalance not repeated" and out.loc["Y", "ok"]
+    assert E.apply_filters(feat, CFG, "A").loc["X", "ok"]                          # off by default
+
+    # blocks: tick test on every print, only off-exchange (82/83) blocks of 300k+ before `at` count
+    t = lambda sec, sym, px, size, pub: (s(sec), sym, px, size, pub)
+    trades = pd.DataFrame([t(900, "X", 5.00, 100, 81),
+                           t(800, "X", 5.01, 400_000, 82),     # uptick: buy
+                           t(700, "X", 5.01, 350_000, 83),     # same price after an uptick: still a buy
+                           t(600, "X", 5.00, 500_000, 82),     # downtick: a sell
+                           t(500, "X", 5.02, 900_000, 81),     # uptick, but on the exchange
+                           t(-5, "X", 5.03, 400_000, 82),      # after the signal
+                           t(900, "Y", 5.00, 400_000, 82)],    # first print of the day: no tick yet
+                          columns=["ts_event", "symbol", "price", "size", "publisher_id"])
+    n = E.buy_blocks(trades, T0, 300_000, [82, 83])
+    assert n["X"] == 2 and n["Y"] == 0
+
+    # one trade a day: the evening's single slot goes to the best day move x relative volume
+    best = {**CFG, "account": {**CFG["account"], "max_positions": 1}}
+    rows = [(T0, "P", "XNAS", "B", 5.5, np.nan, np.nan, 200_000, 600_000),     # up 10%, bigger imbalance
+            (T0, "Q", "XNAS", "B", 5.15, np.nan, np.nan, 200_000, 300_000)]    # up 3%, but 5x volume
+    u = pd.DataFrame({sym: dict(prev_close=5.0, adv_usd=10e6, sigma=0.04, venue="XNAS") for sym in "PQ"}).T
+    u[["prev_close", "adv_usd", "sigma"]] = u[["prev_close", "adv_usd", "sigma"]].astype(float)
+    filt = E.apply_filters(E.features(E.snapshot(hist_rows(rows), T0, 60, 30), u, best, "A"), best, "A")
+    filt["rel_volume"] = pd.Series({"P": 1.0, "Q": 5.0})
+    assert filt["ok"].all() and filt.loc["P", "edge"] > filt.loc["Q", "edge"]
+    by_edge = E.pick_trades(filt, best, "A", 420)
+    assert list(by_edge.index[by_edge["action"] == "TRADE"]) == ["P"]
+    ranked = {**best, "signal": {**best["signal"], "rank_by": "move_x_rvol"}}
+    by_rank = E.pick_trades(filt, ranked, "A", 420)
+    assert list(by_rank.index[by_rank["action"] == "TRADE"]) == ["Q"]            # 3% x 5 beats 10% x 1
+    assert by_rank.loc["P", "reason"] == "max positions tonight"
+
+
+def test_repeat_rule_fetches_imbalances_from_1550(tmp_path, monkeypatch):
+    import backtest
+    monkeypatch.setattr(C, "ROOT", tmp_path)
+    cfg = {**CFG, "signal": {**CFG["signal"], "min_buy_print_share": 1.0}}
+    fake, seen = F.FakeHistorical(), []
+    real = fake.timeseries.get_range
+    fake.timeseries = F.NS(get_range=lambda **req: (seen.append(req), real(**req))[1])
+    f = C.Fetcher(fake, tmp_path, max_usd=100, assume_yes=True)
+    trades, _ = backtest.backtest(f, cfg, dt.date(2026, 9, 8), dt.date(2026, 9, 29))
+    assert set(trades[~trades["missed"]].index) == {"AAAA"}     # buy on every print since 15:50
+    starts = {pd.Timestamp(r["start"]).tz_convert(C.ET).strftime("%H:%M") for r in seen if r["schema"] == "imbalance"}
+    assert starts == {"15:50"}
+
+
+def test_network_timeouts_are_retried(tmp_path, monkeypatch):
+    import requests
+    monkeypatch.setattr(C.Fetcher, "RETRY_WAITS_S", (0, 0, 0))
+    client = _Flaky([])
+    calls = {"n": 0}
+    real = client.timeseries.get_range
+
+    def get_range(**req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise requests.ReadTimeout("read timed out")
+        return real(**req)
+    client.timeseries = F.NS(get_range=get_range)
+    df = C.Fetcher(client, tmp_path, max_usd=100, assume_yes=True).get(**C.req_definitions("XNAS.ITCH", dt.date(2026, 9, 4)))
+    assert not df.empty and calls["n"] == 2
+
+
+def test_streaming_timeouts_are_retried(tmp_path, monkeypatch):
+    from databento.common.error import BentoError
+    monkeypatch.setattr(C.Fetcher, "RETRY_WAITS_S", (0, 0, 0))
+    fake, calls = F.FakeHistorical(), []
+
+    def get_range(**req):
+        calls.append(1)
+        if len(calls) == 1:   # what databento raises when the body read times out mid-download
+            raise BentoError("Error streaming response: HTTPSConnectionPool(host='hist.databento.com', port=443): "
+                             "Read timed out.")
+        return fake.timeseries.get_range(**req)
+
+    client = F.NS(metadata=fake.metadata, timeseries=F.NS(get_range=get_range))
+    df = C.Fetcher(client, tmp_path, max_usd=100, assume_yes=True).get(**C.req_definitions("XNAS.ITCH", dt.date(2026, 9, 4)))
+    assert not df.empty and len(calls) == 2
+
+
 def test_bad_data_never_trades():
     h = hist_rows([(T0, "AAAA", "XNAS", "B", 5.00, np.nan, np.nan, 200_000, np.nan)])     # undefined imbalance
     out = E.run_window(h, uni(), CFG, "A", T0, CLOSE)
@@ -229,6 +368,26 @@ def test_listings_on_a_monday_holiday_step_back_to_friday(tmp_path, monkeypatch)
     assert len(fake.calls) == 2                                    # Mon (empty), then Fri
 
 
+def test_backtest_with_activity_filters(tmp_path, monkeypatch):
+    import backtest
+    on = {"min_rel_volume": 1.5, "min_block_shares": 300_000, "min_call_put_ratio": 1.5}
+    runs = {}
+    for name, extra in {"on": {}, "big block": {"min_block_shares": 500_000}}.items():
+        monkeypatch.setattr(C, "ROOT", tmp_path / name)
+        cfg = {**CFG, "signal": {**CFG["signal"], **on, **extra}}
+        fake = F.FakeHistorical()
+        f = C.Fetcher(fake, tmp_path / name, max_usd=100, assume_yes=True)
+        trades, _ = backtest.backtest(f, cfg, dt.date(2026, 9, 8), dt.date(2026, 9, 29))
+        runs[name] = (trades[~trades["missed"]], fake)
+    filled, fake = runs["on"]
+    assert set(filled.index) == {"AAAA"} and set(filled["window"]) == {"A"}   # 3x volume, 400k block, calls 2:1
+    asked = {c for c in fake.calls if c[1] in ("ohlcv-1m", "trades") or c[0] == "OPRA.PILLAR"}
+    assert asked == {("XNAS.BASIC", "ohlcv-1m"), ("XNAS.BASIC", "trades"), ("OPRA.PILLAR", "ohlcv-1d")}
+    filled, _ = runs["big block"]
+    # no 500k print before 15:53, but the 900k print at 15:54:30 counts for the 15:56 window
+    assert set(filled.index) == {"AAAA"} and set(filled["window"]) == {"B"}
+
+
 def test_ticker_called_NA_survives_csv(tmp_path):
     import live_signals as L
     p = tmp_path / "u.csv"
@@ -306,3 +465,23 @@ def test_api_key_missing_exits_with_hint(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as e:
         C.api_key()
     assert "DATABENTO_API_KEY is not set" in str(e.value) and ".env" in str(e.value)
+
+
+def test_hold_exit_rules_by_hand():
+    import hold_test as H
+    bar = lambda o, h, l, c: {"open": o, "high": h, "low": l, "close": c}
+    days = lambda *b: pd.DataFrame(list(b))
+    # target reached on day 2 at 11.0 (entry 10, +10%)
+    assert H.hold_exit(10, days(bar(10, 10.5, 9.8, 10.2), bar(10.3, 11.2, 10.1, 11)), 0.10, 0.05, 20) == (11.0, "target", 2)
+    # same day touches both: the stop (9.5) counts first
+    assert H.hold_exit(10, days(bar(10, 11.5, 9.4, 10)), 0.10, 0.05, 20) == (9.5, "stop", 1)
+    # gap down through the stop fills at the open; gap up through the target fills at the open
+    assert H.hold_exit(10, days(bar(9.0, 9.2, 8.8, 9.1)), 0.10, 0.05, 20) == (9.0, "stop", 1)
+    assert H.hold_exit(10, days(bar(11.4, 11.6, 11.3, 11.5)), 0.10, 0.05, 20) == (11.4, "target", 1)
+    # neither level within max days: sell at that day's close; too little data: open
+    flat = days(*[bar(10, 10.4, 9.7, 10.1)] * 3)
+    assert H.hold_exit(10, flat, 0.10, 0.05, 3) == (10.1, "time", 3)
+    px, reason, held = H.hold_exit(10, flat, 0.10, 0.05, 20)
+    assert np.isnan(px) and reason == "open" and held == 3
+    # no stop: a deep dip does not exit
+    assert H.hold_exit(10, days(bar(10, 10.2, 8.0, 10), bar(10, 11.0, 9.9, 10.8)), 0.10, None, 20) == (11.0, "target", 2)

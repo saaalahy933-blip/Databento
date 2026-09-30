@@ -44,6 +44,28 @@ max_age_s = 30                # snapshot older than this = stale
 lookback_a_s = 60             # stability look-back, Window A (updates every 10 s)
 lookback_b_s = 15             # stability look-back, Window B (updates every 1 s)
 max_shrink = 0.50             # drop if imbalance has shrunk >50% from its recent peak
+# Momentum filters (comment out to switch off). Both use the auction reference price vs yesterday's close.
+# min_day_move = 0.03         # stock already up at least 3% today
+# min_move_to_sigma = 1.5     # and that move is at least 1.5x its normal daily move (20-day sigma)
+# Activity filters (comment out to switch off). Each needs data bought for the candidates only (see [activity]).
+# min_rel_volume = 1.5        # volume from the open to now >= 1.5x the 20-day average up to the same time
+# min_block_shares = 300000   # at least one single print of this many shares earlier today
+# min_call_put_ratio = 1.5    # option call / put volume today (stocks without options pass)
+# min_block_count = 2         # at least this many blocks (>= min_block_shares, off-exchange) printed on an
+                              # uptick before the signal, i.e. repeated buyer-initiated blocks
+# Repeated imbalance and ranking.
+# min_buy_print_share = 1.0   # buy side on this share of today's closing-imbalance prints so far (1.0 = every one)
+# rank_by = "move_x_rvol"     # give the evening's slots by day move x relative volume instead of edge.
+                              # With [account] max_positions = 1, only that best idea trades each day.
+
+[activity]                    # where the activity filters get their data
+volume_dataset = "XNAS.BASIC" # 1-minute bars; includes the Nasdaq/FINRA TRF (off-exchange) prints
+trades_dataset = "XNAS.BASIC" # individual prints, so block trades done off-exchange count
+block_publisher_ids = [82, 83] # blocks = off-exchange prints only (XNAS.BASIC: 82 FINRA/Nasdaq TRF Carteret,
+                               # 83 TRF Chicago). Leaves out the exchange opening cross, which prints as one big trade.
+options_dataset = "OPRA.PILLAR"
+rel_volume_days = 20
+min_volume_days = 10          # fewer prior sessions than this = no relative volume (fails the filter)
 
 [costs]
 commission_per_share = 0.0035

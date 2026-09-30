@@ -32,6 +32,10 @@ PLAN = {
     "NA": ("A", False, 100_000, 100_000, -0.01, -0.01),      # ticker literally "NA", sell imbalance
 }
 ASK_PREMIUM = {"HHHH": 0.02}   # ask vs reference in the seconds after the decision (default +0.1%)
+# activity data: today's volume vs normal, block prints (ET time, shares), option call/put volume
+REL_VOLUME = {"AAAA": 3.0}                                   # default 1.0
+BLOCKS = {"AAAA": [("10:00", 400_000), ("15:54:30", 900_000)]}   # default one 1,000-share print at 10:00
+OPTIONS = {"AAAA": (200, 100), "HHHH": (50, 100)}            # (calls, puts); others have no options (422)
 
 
 def ns(ts: pd.Timestamp) -> int:
@@ -53,9 +57,21 @@ def official_close(sym: str, day: dt.date) -> float:
     return round(ref_at_close(sym, day) * (1 + PLAN[sym][5]), 4)
 
 
-def _meta(dataset, schema, symbols, start, end):
+def _at(day: dt.date, hhmmss: str) -> pd.Timestamp:
+    return pd.Timestamp(f"{day} {hhmmss}", tz=C.ET).tz_convert("UTC")
+
+
+def osi(root: str, cp: str) -> str:
+    return f"{root:<6}261016{cp}00005000"
+
+
+def _meta(dataset, schema, symbols, start, end, parents=None):
     mappings = []
-    if symbols != "ALL_SYMBOLS":
+    if parents is not None:                  # parent symbology: one mapping per option contract
+        s0, s1 = pd.Timestamp(start).date(), pd.Timestamp(end).date() + dt.timedelta(days=1)
+        for iid, raw in parents.items():
+            mappings.append(NS(raw_symbol=raw, intervals=[NS(start_date=s0, end_date=s1, symbol=str(iid))]))
+    elif symbols != "ALL_SYMBOLS":
         s0, s1 = pd.Timestamp(start).date(), pd.Timestamp(end).date() + dt.timedelta(days=1)
         for s in symbols:
             if s in IID:
@@ -102,7 +118,14 @@ class FakeHistorical:
         self.timeseries = NS(get_range=self._get_range)
 
     def _cost(self, **q):
+        if q.get("stype_in") == "parent":
+            self._check_options(q["symbols"])
         return 0.01
+
+    @staticmethod
+    def _check_options(symbols):
+        if any(s.removesuffix(".OPT") not in OPTIONS for s in symbols):
+            raise db.BentoClientError(http_status=422, message="symbology: could not resolve")
 
     def _range(self, dataset):
         return {"end": "2026-09-30T00:00:00Z", "schema": {}}
@@ -122,7 +145,7 @@ class FakeHistorical:
                         min_price_increment=10_000_000, display_factor=PX, raw_symbol=s, asset=s[:4],
                         security_type="", instrument_class=d.InstrumentClass.STOCK, security_update_action=d.SecurityUpdateAction.ADD,
                         exchange=v))
-        elif schema == "ohlcv-1d":
+        elif schema == "ohlcv-1d" and dataset != "OPRA.PILLAR":
             for day in SESSIONS:
                 t = pd.Timestamp(day, tz="UTC")
                 if start <= t < end:
@@ -155,5 +178,37 @@ class FakeHistorical:
                     recs.append(d.StatMsg(publisher_id=2, instrument_id=IID[s], ts_event=ns(close_at), ts_recv=ns(close_at),
                                           ts_ref=0, price=int(round(official_close(s, day) * PX)), quantity=50_000,
                                           stat_type=d.StatType.CLOSE_PRICE))
+        elif schema == "ohlcv-1m":
+            last = end.tz_convert(C.ET).date()
+            for day in SESSIONS:
+                for hhmm in ("10:00", "12:00", "14:00", "15:00"):
+                    t = _at(day, hhmm)
+                    if start <= t < end:
+                        for s in symbols:
+                            v = int(1000 * (REL_VOLUME.get(s, 1.0) if day == last else 1))
+                            recs.append(d.OHLCVMsg(rtype=d.RType.OHLCV_1M, publisher_id=2, instrument_id=IID[s],
+                                                   ts_event=ns(t), open=PX, high=PX, low=PX, close=PX, volume=v))
+        elif schema == "trades":
+            day = start.tz_convert(C.ET).date()
+            for s in symbols:
+                prints = [("09:30:00", 900_000, 81)] + [(h, z, 82) for h, z in BLOCKS.get(s, [("10:00", 1000)])]
+                for hhmmss, size, pub in prints:             # 81 = the exchange's opening cross, 82 = a TRF print
+                    t = _at(day, hhmmss)
+                    if start <= t < end:
+                        recs.append(d.TradeMsg(publisher_id=pub, instrument_id=IID[s], ts_event=ns(t), price=5 * PX,
+                                               size=size, action=d.Action.TRADE, side=d.Side.NONE, depth=0,
+                                               ts_recv=ns(t), flags=0, ts_in_delta=0, sequence=0))
+        elif schema == "ohlcv-1d" and dataset == "OPRA.PILLAR":
+            self._check_options(symbols)
+            parents = {}
+            for s in symbols:
+                root = s.removesuffix(".OPT")
+                for k, (cp, vol) in enumerate(zip("CP", OPTIONS[root])):
+                    iid = 9000 + 10 * IID[root] + k
+                    parents[iid] = osi(root, cp)
+                    recs.append(d.OHLCVMsg(rtype=d.RType.OHLCV_1D, publisher_id=20, instrument_id=iid,
+                                           ts_event=ns(start), open=PX, high=PX, low=PX, close=PX, volume=vol))
+            m = _meta(dataset, schema, symbols, start, end, parents)
+            return db.DBNStore.from_bytes(m.encode() + b"".join(bytes(r) for r in recs))
         m = _meta(dataset, schema, symbols, start, end)
         return db.DBNStore.from_bytes(m.encode() + b"".join(bytes(r) for r in recs))
