@@ -55,6 +55,8 @@ max_shrink = 0.50             # drop if imbalance has shrunk >50% from its recen
 [activity]                    # where the activity filters get their data
 volume_dataset = "XNAS.BASIC" # 1-minute bars; includes the Nasdaq/FINRA TRF (off-exchange) prints
 trades_dataset = "XNAS.BASIC" # individual prints, so block trades done off-exchange count
+block_publisher_ids = [82, 83] # blocks = off-exchange prints only (XNAS.BASIC: 82 FINRA/Nasdaq TRF Carteret,
+                               # 83 TRF Chicago). Leaves out the exchange opening cross, which prints as one big trade.
 options_dataset = "OPRA.PILLAR"
 rel_volume_days = 20
 min_volume_days = 10          # fewer prior sessions than this = no relative volume (fails the filter)

@@ -300,11 +300,15 @@ def rel_volume(bars: pd.DataFrame, session, at: pd.Timestamp, n_days: int, min_d
     return (daily.loc[session] / avg.where(avg > 0)).rename("rel_volume")
 
 
-def max_block(trades: pd.DataFrame, at: pd.Timestamp) -> pd.Series:
-    """symbol -> largest single print (shares) before `at`."""
+def max_block(trades: pd.DataFrame, at: pd.Timestamp, publisher_ids: list[int] | None = None) -> pd.Series:
+    """symbol -> largest single print (shares) before `at`. With `publisher_ids`, count only prints from these
+    publishers (e.g. the off-exchange TRFs), so the exchange's opening cross, which prints as one large trade at
+    09:30, is not taken for a block."""
     if trades.empty:
         return pd.Series(dtype=float)
     t = trades[pd.to_datetime(trades["ts_event"], utc=True) < at]
+    if publisher_ids is not None:
+        t = t[t["publisher_id"].isin(publisher_ids)]
     return t.groupby("symbol")["size"].max().astype(float).rename("max_block")
 
 

@@ -191,10 +191,11 @@ class FakeHistorical:
         elif schema == "trades":
             day = start.tz_convert(C.ET).date()
             for s in symbols:
-                for hhmmss, size in BLOCKS.get(s, [("10:00", 1000)]):
+                prints = [("09:30:00", 900_000, 81)] + [(h, z, 82) for h, z in BLOCKS.get(s, [("10:00", 1000)])]
+                for hhmmss, size, pub in prints:             # 81 = the exchange's opening cross, 82 = a TRF print
                     t = _at(day, hhmmss)
                     if start <= t < end:
-                        recs.append(d.TradeMsg(publisher_id=2, instrument_id=IID[s], ts_event=ns(t), price=5 * PX,
+                        recs.append(d.TradeMsg(publisher_id=pub, instrument_id=IID[s], ts_event=ns(t), price=5 * PX,
                                                size=size, action=d.Action.TRADE, side=d.Side.NONE, depth=0,
                                                ts_recv=ns(t), flags=0, ts_in_delta=0, sequence=0))
         elif schema == "ohlcv-1d" and dataset == "OPRA.PILLAR":

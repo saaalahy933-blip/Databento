@@ -146,6 +146,18 @@ def test_activity_measures_by_hand():
     assert cp["X"] == pytest.approx(3.0) and cp["Y"] == np.inf
 
 
+def test_opening_cross_on_the_exchange_is_not_a_block():
+    at = pd.Timestamp("2026-09-29 15:53", tz=C.ET).tz_convert("UTC")
+    ts = lambda hhmm: pd.Timestamp(f"2026-09-29 {hhmm}", tz=C.ET).tz_convert("UTC")
+    trades = pd.DataFrame({"ts_event": [ts("09:30"), ts("11:00"), ts("09:30"), ts("12:00")],
+                           "symbol": ["X", "X", "Y", "Y"], "size": [900_000, 120_000, 900_000, 350_000],
+                           "publisher_id": [81, 82, 81, 83]})
+    trf = E.max_block(trades, at, [82, 83])
+    assert trf["X"] == 120_000 and trf["Y"] == 350_000
+    assert E.max_block(trades, at)["X"] == 900_000                            # without the filter the cross counts
+    assert CFG["activity"]["block_publisher_ids"] == [82, 83]
+
+
 def test_network_timeouts_are_retried(tmp_path, monkeypatch):
     import requests
     monkeypatch.setattr(C.Fetcher, "RETRY_WAITS_S", (0, 0, 0))

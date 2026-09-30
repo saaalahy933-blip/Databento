@@ -214,7 +214,7 @@ def fetch_activity(f: C.Fetcher, cfg: dict, symbols: list[str], session: dt.date
         if req["schema"] == "ohlcv-1m":
             out["rel_volume"] = E.rel_volume(raw, session, at, a["rel_volume_days"], a["min_volume_days"]).reindex(out.index)
         elif req["schema"] == "trades":
-            out["max_block"] = E.max_block(raw, at).reindex(out.index)
+            out["max_block"] = E.max_block(raw, at, a.get("block_publisher_ids")).reindex(out.index)
         else:
             out["cp_ratio"] = E.call_put_ratio(raw).reindex(out.index)
     return out
