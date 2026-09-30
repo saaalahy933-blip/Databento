@@ -225,3 +225,19 @@ def test_live_runner_with_fake_feed(tmp_path, monkeypatch, capsys):
     # ledger: each symbol is a TRADE at most once per evening
     assert log.loc[log["action"] == "TRADE", "symbol"].is_unique
     assert "records so far" in out
+
+
+def test_api_key_from_dotenv(tmp_path, monkeypatch):
+    monkeypatch.delenv("DATABENTO_API_KEY", raising=False)
+    monkeypatch.setattr(C, "ROOT", tmp_path)
+    (tmp_path / ".env").write_text("DATABENTO_API_KEY=db-from-dotenv\n")
+    assert C.api_key() == "db-from-dotenv"
+
+
+def test_api_key_missing_exits_with_hint(tmp_path, monkeypatch):
+    monkeypatch.delenv("DATABENTO_API_KEY", raising=False)
+    monkeypatch.setattr(C, "ROOT", tmp_path)
+    (tmp_path / ".env").write_text("DATABENTO_API_KEY=\n")
+    with pytest.raises(SystemExit) as e:
+        C.api_key()
+    assert "DATABENTO_API_KEY is not set" in str(e.value) and ".env" in str(e.value)
